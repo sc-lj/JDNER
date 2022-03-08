@@ -8,6 +8,8 @@
 @Desc    :   None
 '''
 from collections import defaultdict
+from pypinyin import pinyin,Style
+import re
 
 def read_sample_file():
     with open("data/train_500.txt",'r') as f:
@@ -68,7 +70,35 @@ def read_sample_file():
         samples.append(sample)
         if entity_name:
             entities[entity_name].append("".join(entity_txt))
+    with open("data/texts.txt",'w') as f:
+        for line in texts:
+            f.write(line+"\n")
     return samples,texts,entities
 
+chinses_compile = re.compile("[\u4e00-\u9fa5]")
 
+def get_pinyin_vocab():
+    """获取训练集中所有字符的拼音，或者多音拼音
+    """
+    with open("data/texts.txt",'r') as f:
+        lines = f.readlines()
+    
+    pinyin_vocab = []
+    for line in lines:
+        for w in line:
+            if chinses_compile.match(w):
+                w_pin = pinyin(w,style=Style.TONE3,heteronym=True)
+                pinyin_vocab.extend(w_pin)
+    pinyin_vocab = sum(pinyin_vocab,[])
+    pinyin_vocab = set(pinyin_vocab)
+    with open("pinyin_data/py_vocab.txt",'w') as f:
+        for line in pinyin_vocab:
+            f.write(line+"\n")
+    
+
+
+
+if __name__ == "__main__":
+    # read_sample_file()
+    get_pinyin_vocab()
 
