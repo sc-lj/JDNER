@@ -54,7 +54,8 @@ def compute_corrector_prf(results):
     if detection_precision + detection_recall == 0:
         detection_f1 = 0
     else:
-        detection_f1 = 2 * (detection_precision * detection_recall) / (detection_precision + detection_recall)
+        detection_f1 = 2 * (detection_precision * detection_recall) / \
+            (detection_precision + detection_recall)
     print("The detection result is precision={}, recall={} and F1={}".format(detection_precision, detection_recall,
                                                                              detection_f1))
 
@@ -85,7 +86,8 @@ def compute_corrector_prf(results):
     if correction_precision + correction_recall == 0:
         correction_f1 = 0
     else:
-        correction_f1 = 2 * (correction_precision * correction_recall) / (correction_precision + correction_recall)
+        correction_f1 = 2 * (correction_precision * correction_recall) / \
+            (correction_precision + correction_recall)
     print("The correction result is precision={}, recall={} and F1={}".format(correction_precision,
                                                                               correction_recall,
                                                                               correction_f1))
@@ -107,7 +109,8 @@ def dump_json(obj, fp):
         if not os.path.exists(os.path.dirname(fp)):
             os.makedirs(os.path.dirname(fp))
         with open(fp, 'w', encoding='utf8') as f:
-            json.dump(obj, f, ensure_ascii=False, indent=4, separators=(',', ':'))
+            json.dump(obj, f, ensure_ascii=False,
+                      indent=4, separators=(',', ':'))
         print(f'json文件保存成功，{fp}')
         return True
     except Exception as e:
@@ -166,10 +169,14 @@ def compute_sentence_level_prf(results):
         precision = TP / (TP + FP)
     if TP + FN == 0:
         recall = 0
-    else:recall = TP / (TP + FN)
+    else:
+        recall = TP / (TP + FN)
     if precision + recall == 0:
         f1 = 0
-    else:f1 = 2 * precision * recall / (precision + recall) if precision + recall != 0 else 0
+    else:
+        f1 = 2 * precision * recall / \
+            (precision + recall) if precision + recall != 0 else 0
 
-    print(f'Sentence Level: acc:{acc:.6f}, precision:{precision:.6f}, recall:{recall:.6f}, f1:{f1:.6f}')
+    print(
+        f'Sentence Level: acc:{acc:.6f}, precision:{precision:.6f}, recall:{recall:.6f}, f1:{f1:.6f}')
     return acc, precision, recall, f1

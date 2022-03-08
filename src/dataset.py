@@ -6,19 +6,36 @@
 """
 import torch
 from torch.utils.data import Dataset, DataLoader
-
 from .utils import load_json
+from pinyin_tool import PinyinTool
+from transformers.models.bert.tokenization_bert import BertTokenizer
 
 
 class CorrectorDataset(Dataset):
     def __init__(self, fp):
         self.data = load_json(fp)
 
+        py_dict_path = './pinyin_data/zi_py.txt'
+        py_vocab_path = './pinyin_data/py_vocab.txt'
+        sk_dict_path = './stroke_data/zi_sk.txt'
+        sk_vocab_path = './stroke_data/sk_vocab.txt'
+        self.tokenizer = BertTokenizer.from_pretrained("")
+
+        self.pytool = PinyinTool(
+            py_dict_path=py_dict_path, py_vocab_path=py_vocab_path, py_or_sk='py')
+        self.sktool = PinyinTool(
+            py_dict_path=sk_dict_path, py_vocab_path=sk_vocab_path, py_or_sk='sk')
+
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, index):
-        return self.data[index]['original_text'], self.data[index]['correct_text'], self.data[index]['wrong_ids']
+        data = self.data[index]
+        sample = data['sample']
+        text = [t.split("\t")[0] for t in sample]
+        label = [t.split("\t")[1] for t in sample]
+        encoded_texts = [self.tokenizer.tokenize(t) for t in text]
+        return
 
 
 def get_corrector_loader(fp, tokenizer, **kwargs):

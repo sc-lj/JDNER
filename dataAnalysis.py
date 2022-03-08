@@ -21,7 +21,7 @@ def read_sample_file():
     samples = []
     sample = []
     texts = []
-    special_char = "<SPACE>"
+    space_char = "[unused1]"
     text_entity_pair = []
     entity_txt = ''
     entity_name = ''
@@ -32,7 +32,7 @@ def read_sample_file():
             if len(sample):
                 samples.append(sample)
                 text = "".join([t.split("\t")[0] for t in sample])
-                text = text.replace(special_char, " ")
+                text = text.replace(space_char, " ")
                 texts.append(text)
                 if entity_name:
                     entities[entity_name].append("".join(entity_txt))
@@ -53,7 +53,7 @@ def read_sample_file():
         elif len(line) == 1:
             tag = line[0]
             txt = " "
-            sample.append("\t".join((special_char, line[0])))
+            sample.append("\t".join((space_char, line[0])))
         else:
             print(line)
         if tag == "O":
@@ -75,7 +75,7 @@ def read_sample_file():
 
     if len(sample):
         text = "".join([t.split("\t")[0] for t in sample])
-        text = text.replace(special_char, " ")
+        text = text.replace(space_char, " ")
         texts.append(text)
         samples.append(sample)
         if entity_name:
@@ -87,7 +87,7 @@ def read_sample_file():
     with open("data/text_entity_paires.json", 'w') as f:
         json.dump(text_entity_pair, f, ensure_ascii=False)
 
-    with open("data/sample_text.json", 'w') as f:
+    with open("data/sample_text.txt", 'w') as f:
         for line in texts:
             f.write(line+"\n")
 
@@ -96,7 +96,14 @@ def read_sample_file():
 
     labels = entities.keys()
     labels = sorted(labels)
-    label2ids = {label: i for i, label in enumerate(labels)}
+    new_labels = {}
+    num = 0
+    for label in labels:
+        new_labels["B-"+label] = num
+        num += 1
+        new_labels["I-"+label] = num
+        num += 1
+    label2ids = new_labels
 
     with open("data/label2ids.json", 'w') as f:
         json.dump(label2ids, f, ensure_ascii=False)
@@ -110,7 +117,7 @@ chinses_compile = re.compile("[\u4e00-\u9fa5]")
 def get_pinyin_vocab():
     """获取训练集中所有字符的拼音，或者多音拼音
     """
-    with open("data/texts.txt", 'r') as f:
+    with open("data/sample_text.txt", 'r') as f:
         lines = f.readlines()
 
     pinyin_vocab = []
@@ -127,8 +134,5 @@ def get_pinyin_vocab():
 
 
 if __name__ == "__main__":
-    # read_sample_file()
-    get_pinyin_vocab()
-
-if __name__ == "__main__":
     read_sample_file()
+    # get_pinyin_vocab()
