@@ -21,25 +21,31 @@ import numpy as np
 
 
 class DetectionNetwork(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config,flg,max_sen_len):
         super().__init__()
         self.config = config
+        self.PYDIM = 30
+        self.seq_len = self.PYLEN if 'py' in flg else self.SKLEN
+        num_embeddings = 30 if flg else 7
+        self.pyemb = nn.Embedding(num_embeddings,self.PYDIM)
         self.gru = nn.GRU(
+            self.PYDIM,
             self.config.hidden_size,
-            self.config.hidden_size // 2,
-            num_layers=2,
+            num_layers=1,
             batch_first=True,
             dropout=self.config.hidden_dropout_prob,
             bidirectional=True,
         )
-        self.sigmoid = nn.Sigmoid()
-        self.linear = nn.Linear(self.config.hidden_size, 1)
+        self.MAX_SEN_LEN = max_sen_len
 
-    def forward(self, hidden_states):
-        out, _ = self.gru(hidden_states)
-        prob = self.linear(out)
-        prob = self.sigmoid(prob)
-        return prob
+    def forward(self, sen_pyids):
+        sen_pyids = sen_pyids.reshape(-1,self.seq_len)
+        sen_emb = self.pyemb(sen_pyids)
+        sen_emb = sen_emb.reshape(-1,self.seq_len,self.PYDIM)
+        all_out, final_out = self.gru(sen_emb)
+        lstm_output = final_out.reshape(shape=[-1, self.MAX_SEN_LEN, self.config.hidden_size])
+
+        return lstm_output
 
 
 class BertCorrectionModel(torch.nn.Module, ModuleUtilsMixin):

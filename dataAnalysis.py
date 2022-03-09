@@ -97,7 +97,8 @@ def read_sample_file():
     labels = entities.keys()
     labels = sorted(labels)
     new_labels = {}
-    num = 0
+    new_labels["O"] = 0
+    num = 1
     for label in labels:
         new_labels["B-"+label] = num
         num += 1

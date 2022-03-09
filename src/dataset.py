@@ -5,6 +5,8 @@
 @Email  :   abtion{at}outlook.com
 """
 import torch
+import json
+import numpy as np
 from torch.utils.data import Dataset, DataLoader
 from .utils import load_json
 from pinyin_tool import PinyinTool
@@ -14,11 +16,15 @@ from transformers.models.bert.tokenization_bert import BertTokenizer
 class CorrectorDataset(Dataset):
     def __init__(self, fp):
         self.data = load_json(fp)
+        self.space_char = "[unused1]"
 
         py_dict_path = './pinyin_data/zi_py.txt'
         py_vocab_path = './pinyin_data/py_vocab.txt'
         sk_dict_path = './stroke_data/zi_sk.txt'
         sk_vocab_path = './stroke_data/sk_vocab.txt'
+        label2id_path = "data/label2ids.json"
+        with open(label2id_path,'r') as f:
+            self.label2ids = json.load(f)
         self.tokenizer = BertTokenizer.from_pretrained("")
 
         self.pytool = PinyinTool(
@@ -26,42 +32,80 @@ class CorrectorDataset(Dataset):
         self.sktool = PinyinTool(
             py_dict_path=sk_dict_path, py_vocab_path=sk_vocab_path, py_or_sk='sk')
 
+        self.PYID2SEQ = self.pytool.get_pyid2seq_matrix() 
+        self.SKID2SEQ = self.sktool.get_pyid2seq_matrix()
+
+        self.tokenid_pyid = {}
+        self.tokenid_skid = {}
+        for key in self.tokenizer.vocab:
+            self.tokenid_pyid[self.tokenizer.vocab[key]] = self.pytool.get_pinyin_id(key)    
+            self.tokenid_skid[self.tokenizer.vocab[key]] = self.sktool.get_pinyin_id(key)   
+        self.max_sen_len = 512
+
+
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, index):
         data = self.data[index]
         sample = data['sample']
-        text = [t.split("\t")[0] for t in sample]
-        label = [t.split("\t")[1] for t in sample]
-        encoded_texts = [self.tokenizer.tokenize(t) for t in text]
-        return
+        tokens = [t.split("\t")[0] for t in sample]
+        labels = [t.split("\t")[1] for t in sample]
+        # Account for [CLS] and [SEP] with "- 2"
+        if len(tokens) > self.max_sen_len - 2:
+            tokens = tokens[0:(self.max_sen_len - 2)]
+            labels = labels[0:(self.max_sen_len - 2)]
+
+        _tokens = []
+        _labels = []
+        _lmask = []
+        segment_ids = []
+        stroke_ids = []
+        _tokens.append("[CLS]")
+        _lmask.append(0)
+        _labels.append(self.label2ids["O"])
+        segment_ids.append(0)
+        stroke_ids.append(0)
+        for token, label in zip(tokens, labels):
+            _tokens.append(token.lower())
+            _labels.append(self.label2ids[label])
+            _lmask.append(1)
+            pyid = self.pytool.get_pinyin_id(token)
+            segment_ids.append(self.PYID2SEQ[pyid,:])
+            skid = self.sktool.get_pinyin_id(token)
+            stroke_ids.append(self.SKID2SEQ[skid,:])
+        _tokens.append("[SEP]")
+        _labels.append(self.label2ids["O"])
+        _lmask.append(0)
+        segment_ids.append(0)
+        stroke_ids.append(0)
+        input_ids = self.tokenizer.convert_tokens_to_ids(_tokens)
+
+        # The mask has 1 for real tokens and 0 for padding tokens. Only real
+        # tokens are attended to.
+        input_mask = [1] * len(input_ids)
+        # Zero-pad up to the sequence length.
+        while len(input_ids) < self.max_sen_len:
+            input_ids.append(0)
+            input_mask.append(0)
+            segment_ids.append(0)
+            stroke_ids.append(0)
+            _labels.append(labels[0])
+            _lmask.append(0)
+
+        return {"input_ids":input_ids,"input_mask":input_mask,"segment_ids":segment_ids,"stroke_ids":stroke_ids,"labels":_labels,"lmask":_lmask}
+
+    def get_zi_py_matrix(self):
+        pysize = 430
+        matrix = []
+        for k in range(len(self.tokenizer.vocab)):
+            matrix.append([0] * pysize)
+
+        for key in self.tokenizer.vocab:
+            tokenid = self.tokenizer.vocab[key]
+            pyid = self.pytool.get_pinyin_id(key)
+            matrix[tokenid][pyid] = 1.
+        return np.asarray(matrix, dtype=np.float32) 
 
 
-def get_corrector_loader(fp, tokenizer, **kwargs):
-    def _collate_fn(data):
-        ori_texts, cor_texts, wrong_idss = zip(*data)
-        encoded_texts = [tokenizer.tokenize(t) for t in ori_texts]
-        max_len = max([len(t) for t in encoded_texts]) + 2
-        det_labels = torch.zeros(len(ori_texts), max_len).long()
-        for i, (encoded_text, wrong_ids) in enumerate(zip(encoded_texts, wrong_idss)):
-            for idx in wrong_ids:
-                margins = []
-                for word in encoded_text[:idx]:
-                    if word == '[UNK]':
-                        break
-                    if word.startswith('##'):
-                        margins.append(len(word) - 3)
-                    else:
-                        margins.append(len(word) - 1)
-                margin = sum(margins)
-                move = 0
-                while (abs(move) < margin) or (idx + move >= len(encoded_text)) or encoded_text[idx + move].startswith(
-                        '##'):
-                    move -= 1
-                det_labels[i, idx + move + 1] = 1
-        return ori_texts, cor_texts, det_labels
 
-    dataset = CorrectorDataset(fp)
-    loader = DataLoader(dataset, collate_fn=_collate_fn, **kwargs)
-    return loader
