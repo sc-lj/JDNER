@@ -7,27 +7,29 @@
 import operator
 import os
 from collections import OrderedDict
+from tkinter.messagebox import NO
 
 import torch
 from torch import nn
 import pytorch_lightning as pl
 from torch.optim.lr_scheduler import LambdaLR
 from transformers import BertConfig
-from transformers.models.bert.modeling_bert import BertEmbeddings, BertEncoder, BertPooler, BertOnlyMLMHead
+from transformers.models.bert.modeling_bert import BertEncoder, BertPooler, BertOnlyMLMHead, BertModel, BertEmbeddings as bertEmbeddings
+from transformers.modeling_outputs import BaseModelOutputWithPoolingAndCrossAttentions
 from transformers.modeling_utils import ModuleUtilsMixin
 
 from .utils import compute_corrector_prf, compute_sentence_level_prf
 import numpy as np
 
 
-class DetectionNetwork(nn.Module):
-    def __init__(self, config,flg,max_sen_len):
+class EmbeddingNetwork(nn.Module):
+    def __init__(self, config, PYLEN, num_embeddings, max_sen_len=512):
         super().__init__()
         self.config = config
         self.PYDIM = 30
-        self.seq_len = self.PYLEN if 'py' in flg else self.SKLEN
-        num_embeddings = 30 if flg else 7
-        self.pyemb = nn.Embedding(num_embeddings,self.PYDIM)
+        self.seq_len = PYLEN
+        num_embeddings = num_embeddings
+        self.pyemb = nn.Embedding(num_embeddings, self.PYDIM)
         self.gru = nn.GRU(
             self.PYDIM,
             self.config.hidden_size,
@@ -39,80 +41,139 @@ class DetectionNetwork(nn.Module):
         self.MAX_SEN_LEN = max_sen_len
 
     def forward(self, sen_pyids):
-        sen_pyids = sen_pyids.reshape(-1,self.seq_len)
+        sen_pyids = sen_pyids.reshape(-1, self.seq_len)
         sen_emb = self.pyemb(sen_pyids)
-        sen_emb = sen_emb.reshape(-1,self.seq_len,self.PYDIM)
+        sen_emb = sen_emb.reshape(-1, self.seq_len, self.PYDIM)
         all_out, final_out = self.gru(sen_emb)
-        lstm_output = final_out.reshape(shape=[-1, self.MAX_SEN_LEN, self.config.hidden_size])
+        lstm_output = final_out.reshape(
+            shape=[-1, self.MAX_SEN_LEN, self.config.hidden_size])
 
         return lstm_output
 
 
-class BertCorrectionModel(torch.nn.Module, ModuleUtilsMixin):
+class BertEmbeddings(bertEmbeddings):
+    def forward(
+        self, input_ids=None, token_type_ids=None, position_ids=None, pinyin_embs=None, inputs_embeds=None, past_key_values_length=0
+    ):
+        if input_ids is not None:
+            input_shape = input_ids.size()
+        else:
+            input_shape = inputs_embeds.size()[:-1]
+
+        seq_length = input_shape[1]
+
+        if position_ids is None:
+            position_ids = self.position_ids[:,
+                                             past_key_values_length: seq_length + past_key_values_length]
+
+        # Setting the token_type_ids to the registered buffer in constructor where it is all zeros, which usually occurs
+        # when its auto-generated, registered buffer helps users when tracing the model without passing token_type_ids, solves
+        # issue #5664
+        if token_type_ids is None:
+            if hasattr(self, "token_type_ids"):
+                buffered_token_type_ids = self.token_type_ids[:, :seq_length]
+                buffered_token_type_ids_expanded = buffered_token_type_ids.expand(
+                    input_shape[0], seq_length)
+                token_type_ids = buffered_token_type_ids_expanded
+            else:
+                token_type_ids = torch.zeros(
+                    input_shape, dtype=torch.long, device=self.position_ids.device)
+
+        if inputs_embeds is None:
+            inputs_embeds = self.word_embeddings(input_ids)
+        token_type_embeddings = self.token_type_embeddings(token_type_ids)
+
+        embeddings = inputs_embeds + token_type_embeddings
+        if self.position_embedding_type == "absolute":
+            position_embeddings = self.position_embeddings(position_ids)
+            embeddings += position_embeddings
+        if pinyin_embs is not None:
+            embeddings += pinyin_embs
+        embeddings = self.LayerNorm(embeddings)
+        embeddings = self.dropout(embeddings)
+        return embeddings
+
+
+class BertModel(torch.nn.Module, ModuleUtilsMixin):
     def __init__(self, config, tokenizer, device):
         super().__init__()
         self.config = config
+        self.pyemb = EmbeddingNetwork(self.config, PYLEN=4, num_embeddings=30)
+        self.skemb = EmbeddingNetwork(self.config, PYLEN=10, num_embeddings=7)
         self.tokenizer = tokenizer
         self.embeddings = BertEmbeddings(self.config)
-        self.corrector = BertEncoder(self.config)
+        self.encoder = BertEncoder(self.config)
         self.mask_token_id = self.tokenizer.mask_token_id
         self.pooler = BertPooler(self.config)
         self.cls = BertOnlyMLMHead(self.config)
         self._device = device
 
-    def forward(self, texts, prob, embed=None, cor_labels=None, residual_connection=False):
-        if cor_labels is not None:
-            text_labels = self.tokenizer(
-                cor_labels, padding=True, return_tensors='pt')['input_ids']
-            text_labels = text_labels.to(self._device)
-            # torch的cross entropy loss 会忽略-100的label
-            text_labels[text_labels == 0] = -100
-        else:
-            text_labels = None
-        encoded_texts = self.tokenizer(
-            texts, padding=True, return_tensors='pt')
-        encoded_texts.to(self._device)
-        if embed is None:
-            embed = self.embeddings(input_ids=encoded_texts['input_ids'],
-                                    token_type_ids=encoded_texts['token_type_ids'])
-        # 此处较原文有一定改动，做此改动意在完整保留type_ids及position_ids的embedding。
-        # mask_embed = self.embeddings(torch.ones_like(prob.squeeze(-1)).long() * self.mask_token_id).detach()
-        # 此处为原文实现
-        mask_embed = self.embeddings(torch.tensor(
-            [[self.mask_token_id]], device=self._device)).detach()
-        cor_embed = prob * mask_embed + (1 - prob) * embed
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        token_type_ids=None,
+        position_ids=None,
+        head_mask=None,
+        return_dict=None,
+        py2ids=None,
+        sk2ids=None
+    ):
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        input_shape = encoded_texts['input_ids'].size()
-        device = encoded_texts['input_ids'].device
+        input_shape = input_ids.size()
+        batch_size, seq_length = input_shape
 
-        extended_attention_mask: torch.Tensor = self.get_extended_attention_mask(encoded_texts['attention_mask'],
-                                                                                 input_shape, device)
-        head_mask = self.get_head_mask(None, self.config.num_hidden_layers)
-        encoder_outputs = self.corrector(
-            cor_embed,
+        device = input_ids.device
+
+        if token_type_ids is None:
+            if hasattr(self.embeddings, "token_type_ids"):
+                buffered_token_type_ids = self.embeddings.token_type_ids[:, :seq_length]
+                buffered_token_type_ids_expanded = buffered_token_type_ids.expand(
+                    batch_size, seq_length)
+                token_type_ids = buffered_token_type_ids_expanded
+            else:
+                token_type_ids = torch.zeros(
+                    input_shape, dtype=torch.long, device=device)
+
+        # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
+        # ourselves in which case we just need to make it broadcastable to all heads.
+        extended_attention_mask: torch.Tensor = self.get_extended_attention_mask(
+            attention_mask, input_shape, device)
+
+        head_mask = self.get_head_mask(
+            head_mask, self.config.num_hidden_layers)
+
+        py_emb = self.pyemb(py2ids)
+        sk_emb = self.skemb(sk2ids)
+        pinyin_emb = py_emb + sk_emb
+        embedding_output = self.embeddings(
+            input_ids=input_ids,
+            position_ids=position_ids,
+            token_type_ids=token_type_ids,
+            pinyin_embs=pinyin_emb)
+
+        encoder_outputs = self.encoder(
+            embedding_output,
             attention_mask=extended_attention_mask,
             head_mask=head_mask,
-            encoder_hidden_states=None,
-            encoder_attention_mask=None,
-            return_dict=False,
+            return_dict=return_dict,
         )
         sequence_output = encoder_outputs[0]
         pooled_output = self.pooler(
             sequence_output) if self.pooler is not None else None
 
-        sequence_output = sequence_output + \
-            embed if residual_connection else sequence_output
-        prediction_scores = self.cls(sequence_output)
-        out = (prediction_scores, sequence_output, pooled_output)
+        if not return_dict:
+            return (sequence_output, pooled_output) + encoder_outputs[1:]
 
-        # Masked language modeling softmax layer
-        if text_labels is not None:
-            # -100 index = padding token
-            loss_fct = nn.CrossEntropyLoss(reduction='sum')
-            cor_loss = loss_fct(
-                prediction_scores.view(-1, self.config.vocab_size), text_labels.view(-1))
-            out = (cor_loss,) + out
-        return out
+        return BaseModelOutputWithPoolingAndCrossAttentions(
+            last_hidden_state=sequence_output,
+            pooler_output=pooled_output,
+            past_key_values=encoder_outputs.past_key_values,
+            hidden_states=encoder_outputs.hidden_states,
+            attentions=encoder_outputs.attentions,
+            cross_attentions=encoder_outputs.cross_attentions,
+        )
 
     def load_from_transformers_state_dict(self, gen_fp):
         state_dict = OrderedDict()
@@ -221,11 +282,8 @@ class SoftMaskedBertModel(BaseCorrectorTrainingModel):
     def __init__(self, args, tokenizer):
         super().__init__(args)
         self.args = args
-        self.config = BertConfig.from_pretrained(args.bert_checkpoint)
-        self.detector = DetectionNetwork(self.config)
         self.tokenizer = tokenizer
-        self.corrector = BertCorrectionModel(
-            self.config, tokenizer, args.device)
+        self.corrector = BertModel(self.config, tokenizer, args.device)
         self._device = args.device
 
     def forward(self, texts, cor_labels=None, det_labels=None):
