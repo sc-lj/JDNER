@@ -84,11 +84,29 @@ def read_sample_file():
         text_entity_pair.append(
             {"text": text, "entities": single_pair, "sample": sample})
 
+    number = len(text_entity_pair)
+    train_number = int(number*0.9)
+    train_text_entity_pair = text_entity_pair[:train_number]
+    val_text_entity_pair = text_entity_pair[train_number:]
+
+    train_text = texts[:train_number]
+    val_text = texts[train_number:]
+
     with open("data/text_entity_paires.json", 'w') as f:
         json.dump(text_entity_pair, f, ensure_ascii=False)
 
-    with open("data/sample_text.txt", 'w') as f:
-        for line in texts:
+    with open("data/train.json", 'w') as f:
+        json.dump(train_text_entity_pair, f, ensure_ascii=False)
+
+    with open("data/val.json", 'w') as f:
+        json.dump(val_text_entity_pair, f, ensure_ascii=False)
+
+    with open("data/train.txt", 'w') as f:
+        for line in train_text:
+            f.write(line+"\n")
+
+    with open("data/train.txt", 'w') as f:
+        for line in val_text:
             f.write(line+"\n")
 
     with open("data/entites.json", 'w') as f:

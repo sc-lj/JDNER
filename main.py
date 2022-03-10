@@ -6,11 +6,12 @@
 """
 import argparse
 import os
+from pyparsing import col
 import torch
-from transformers import BertTokenizer
 import pytorch_lightning as pl
-from src.dataset import get_corrector_loader
-from src.models import SoftMaskedBertModel
+from src.dataset import NerDataset, collate_fn
+from torch.utils.data import DataLoader
+from src.models import JDNerTrainingModel
 from src.utils import get_abs_path
 
 
@@ -27,16 +28,21 @@ def str2bool(v):
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--hard_device", default='cuda', type=str, help="硬件，cpu or cuda")
-    parser.add_argument("--gpu_index", default=0, type=int, help='gpu索引, one of [0,1,2,3,...]')
+    parser.add_argument("--hard_device", default='cuda',
+                        type=str, help="硬件，cpu or cuda")
+    parser.add_argument("--gpu_index", default=0, type=int,
+                        help='gpu索引, one of [0,1,2,3,...]')
     parser.add_argument("--load_checkpoint", nargs='?', const=True, default=False, type=str2bool,
                         help="是否加载训练保存的权重, one of [t,f]")
-    parser.add_argument('--bert_checkpoint', default='/home/vocust001/pretrained_models/rtb3', type=str)
+    parser.add_argument(
+        '--bert_checkpoint', default='/mnt/disk2/PythonProgram/NLPCode/PretrainModel/chinese_bert_base', type=str)
     parser.add_argument('--model_save_path', default='checkpoint', type=str)
     parser.add_argument('--epochs', default=50, type=int, help='训练轮数')
-    parser.add_argument('--batch_size', default=60, type=int, help='批大小')
-    parser.add_argument('--num_workers', default=18, type=int, help='多少进程用于处理数据')
-    parser.add_argument('--warmup_epochs', default=8, type=int, help='warmup轮数, 需小于训练轮数')
+    parser.add_argument('--batch_size', default=10, type=int, help='批大小')
+    parser.add_argument('--num_workers', default=18,
+                        type=int, help='多少进程用于处理数据')
+    parser.add_argument('--warmup_epochs', default=8,
+                        type=int, help='warmup轮数, 需小于训练轮数')
     parser.add_argument('--lr', default=1e-4, type=float, help='学习率')
     parser.add_argument('--accumulate_grad_batches',
                         default=16,
@@ -44,14 +50,16 @@ def parse_args():
                         help='梯度累加的batch数')
     parser.add_argument('--mode', default='train', type=str,
                         help='代码运行模式，以此来控制训练测试或数据预处理，one of [train, test]')
-    parser.add_argument('--loss_weight', default=0.8, type=float, help='论文中的lambda，即correction loss的权重')
+    parser.add_argument('--loss_weight', default=0.8,
+                        type=float, help='论文中的lambda，即correction loss的权重')
     arguments = parser.parse_args()
     if arguments.hard_device == 'cpu':
         arguments.device = torch.device(arguments.hard_device)
     else:
         arguments.device = torch.device(f'cuda:{arguments.gpu_index}')
     if not 0 <= arguments.loss_weight <= 1:
-        raise ValueError(f"The loss weight must be in [0, 1], but get{arguments.loss_weight}")
+        raise ValueError(
+            f"The loss weight must be in [0, 1], but get{arguments.loss_weight}")
     print(arguments)
     return arguments
 
@@ -59,30 +67,27 @@ def parse_args():
 def main():
     args = parse_args()
 
-    tokenizer = BertTokenizer.from_pretrained(args.bert_checkpoint)
-    model = SoftMaskedBertModel(args, tokenizer)
-    train_loader = get_corrector_loader(get_abs_path('data', 'train_vocust.json'),
-                                        tokenizer,
-                                        batch_size=args.batch_size,
-                                        shuffle=True,
-                                        num_workers=args.num_workers)
-    valid_loader = get_corrector_loader(get_abs_path('data', 'val_vocust.json'),
-                                        tokenizer,
-                                        batch_size=args.batch_size,
-                                        shuffle=False,
-                                        num_workers=args.num_workers)
-    # test_loader = get_corrector_loader(get_abs_path('data', 'test.json'),
-    #                                    tokenizer,
-    #                                    batch_size=args.batch_size,
-    #                                    shuffle=False,
-    #                                    num_workers=args.num_workers)
+    train_data = NerDataset("data/train.json", args.bert_checkpoint)
+    train_loader = DataLoader(train_data, batch_size=args.batch_size,
+                              shuffle=True, num_workers=args.num_workers, collate_fn=collate_fn)
+
+    val_data = NerDataset("data/val.json", args.bert_checkpoint)
+    valid_loader = DataLoader(val_data, batch_size=args.batch_size,
+                              shuffle=False, num_workers=args.num_workers, collate_fn=collate_fn)
+
+    args.number_tag = train_data.number_tag
+    args.pylen, args.sklen = train_data.pylen, train_data.sklen
+
     trainer = pl.Trainer(max_epochs=args.epochs,
-                         gpus=None if args.hard_device == 'cpu' else [args.gpu_index],
+                         gpus=None if args.hard_device == 'cpu' else [
+                             args.gpu_index],
                          accumulate_grad_batches=args.accumulate_grad_batches,
-                         resume_from_checkpoint = "lightning_logs/version_0/checkpoints/epoch=19-step=6739.ckpt"
+                         #  resume_from_checkpoint=""
                          )
+    model = JDNerTrainingModel(args)
     # model.load_from_transformers_state_dict(get_abs_path('checkpoint', 'pytorch_model.bin'))
-    model.load_from_transformers_state_dict(os.path.join(args.bert_checkpoint, 'pytorch_model.bin'))
+    model.load_from_transformers_state_dict(
+        os.path.join(args.bert_checkpoint, 'pytorch_model.bin'))
     if args.load_checkpoint:
         model.load_state_dict(torch.load(get_abs_path('checkpoint', f'{model.__class__.__name__}_model.bin'),
                                          map_location=args.hard_device))

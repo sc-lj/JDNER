@@ -18,6 +18,7 @@ from transformers.modeling_outputs import BaseModelOutputWithPoolingAndCrossAtte
 from transformers.modeling_utils import ModuleUtilsMixin
 from torchcrf import CRF
 
+
 class EmbeddingNetwork(nn.Module):
     def __init__(self, config, PYLEN, num_embeddings, max_sen_len=512):
         super().__init__()
@@ -41,6 +42,7 @@ class EmbeddingNetwork(nn.Module):
         sen_emb = self.pyemb(sen_pyids)
         sen_emb = sen_emb.reshape(-1, self.seq_len, self.PYDIM)
         all_out, final_out = self.gru(sen_emb)
+        final_out = final_out.mean(0, keepdim=True)
         lstm_output = final_out.reshape(
             shape=[-1, self.MAX_SEN_LEN, self.config.hidden_size])
 
@@ -91,14 +93,16 @@ class BertEmbeddings(bertEmbeddings):
 
 
 class BertModel(torch.nn.Module, ModuleUtilsMixin):
-    def __init__(self, config):
+    def __init__(self, config, PYLEN, SKLEN, num_labels):
         super().__init__()
         self.config = config
-        self.pyemb = EmbeddingNetwork(self.config, PYLEN=4, num_embeddings=30)
-        self.skemb = EmbeddingNetwork(self.config, PYLEN=10, num_embeddings=7)
+        self.pyemb = EmbeddingNetwork(
+            self.config, PYLEN=PYLEN, num_embeddings=30)
+        self.skemb = EmbeddingNetwork(
+            self.config, PYLEN=SKLEN, num_embeddings=7)
         self.embeddings = BertEmbeddings(self.config)
         self.encoder = BertEncoder(self.config)
-        self.cls = BertOnlyMLMHead(self.config)
+        self.cls = nn.Linear(config.hidden_size, num_labels)
 
     def forward(
         self,
@@ -110,8 +114,6 @@ class BertModel(torch.nn.Module, ModuleUtilsMixin):
         py2ids=None,
         sk2ids=None
     ):
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
         input_shape = input_ids.size()
         batch_size, seq_length = input_shape
 
@@ -150,7 +152,8 @@ class BertModel(torch.nn.Module, ModuleUtilsMixin):
             head_mask=head_mask
         )
         sequence_output = encoder_outputs[0]
-        return sequence_output
+        logits = self.cls(sequence_output)
+        return logits
 
     def load_from_transformers_state_dict(self, gen_fp):
         state_dict = OrderedDict()
@@ -169,35 +172,40 @@ class BertModel(torch.nn.Module, ModuleUtilsMixin):
         self.load_state_dict(state_dict, strict=False)
 
 
-class BaseCorrectorTrainingModel(pl.LightningModule):
-    def __init__(self, arguments, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+class JDNerTrainingModel(pl.LightningModule):
+    def __init__(self, arguments):
+        super().__init__()
         self.args = arguments
-        number_label = self.args.number_tag
-        self.config = BertConfig.from_pretrained("")
-        self.bert = BertModel(self.config)
-        self.crf = CRF(number_label,batch_first=True)
-        self._device = args.device
+        num_labels = self.args.number_tag
+        PYLEN, SKLEN = self.args.pylen, self.args.sklen
+        self.config = BertConfig.from_pretrained(self.args.bert_checkpoint)
+        self.bert = BertModel(self.config, PYLEN, SKLEN, num_labels)
+        self.crf = CRF(num_labels, batch_first=True)
+        self._device = self.args.device
         self.min_loss = float('inf')
 
-    def forward(self, input_ids, input_mask, pinyin_ids,stroke_ids,lmask,labelids):
-        sequence_output = self.bert(input_ids=input_ids,attention_mask=input_mask,py2ids=pinyin_ids,sk2ids=stroke_ids)
+    def forward(self, input_ids, input_mask, pinyin_ids, stroke_ids, lmask, labelids):
+        sequence_output = self.bert(
+            input_ids=input_ids, attention_mask=input_mask, py2ids=pinyin_ids, sk2ids=stroke_ids)
         # crf 训练
-        loss = self.crf(sequence_output,labelids,mask=lmask)
+        loss = self.crf(sequence_output, labelids, mask=lmask)
         return loss
 
     def training_step(self, batch, batch_idx):
-        input_ids, input_mask, pinyin_ids = batch['input_ids'],batch['input_mask'],batch['pinyin_ids']
-        stroke_ids,lmask,labelids =  batch['stroke_ids'],batch['lmask'],batch['labels']
-        loss = self.forward(input_ids, input_mask, pinyin_ids,stroke_ids,lmask,labelids)
+        input_ids, input_mask, pinyin_ids = batch['input_ids'], batch['input_mask'], batch['pinyin_ids']
+        stroke_ids, lmask, labelids = batch['stroke_ids'], batch['lmask'], batch['labels']
+        loss = self.forward(input_ids, input_mask,
+                            pinyin_ids, stroke_ids, lmask, labelids)
         return loss
 
     def validation_step(self, batch, batch_idx):
-        input_ids, input_mask, pinyin_ids = batch['input_ids'],batch['input_mask'],batch['pinyin_ids']
-        stroke_ids,lmask,labelids =  batch['stroke_ids'],batch['lmask'],batch['labels']
-        sequence_output = self.bert(input_ids=input_ids,attention_mask=input_mask,py2ids=pinyin_ids,sk2ids=stroke_ids)
-        val_loss = self.crf(sequence_output,labelids,mask=lmask)
-        predict_tag = self.crf.decode(sequence_output,mask=lmask)
+        input_ids, input_mask, pinyin_ids = batch['input_ids'], batch['input_mask'], batch['pinyin_ids']
+        stroke_ids, lmask, labelids = batch['stroke_ids'], batch['lmask'], batch['labels']
+        sequence_output = self.bert(
+            input_ids=input_ids, attention_mask=input_mask, py2ids=pinyin_ids, sk2ids=stroke_ids)
+        lmask = lmask.type(torch.ByteTensor)
+        val_loss = self.crf(sequence_output, labelids, mask=lmask)
+        predict_tag = self.crf.decode(sequence_output, mask=lmask)
 
         return predict_tag
 
@@ -205,22 +213,23 @@ class BaseCorrectorTrainingModel(pl.LightningModule):
         print('Valid.')
 
     def validation_epoch_end(self, outputs) -> None:
-        det_acc_labels = []
-        cor_acc_labels = []
-        results = []
-        for out in outputs:
-            det_acc_labels += out[1]
-            cor_acc_labels += out[2]
-            results += out[3]
-        loss = np.mean([out[0] for out in outputs])
+        pass
+        # det_acc_labels = []
+        # cor_acc_labels = []
+        # results = []
+        # for out in outputs:
+        #     det_acc_labels += out[1]
+        #     cor_acc_labels += out[2]
+        #     results += out[3]
+        # loss = np.mean([out[0] for out in outputs])
 
-        if (len(outputs) > 5) and (loss < self.min_loss):
-            self.min_loss = loss
-            torch.save(self.state_dict(),
-                       os.path.join(self.args.model_save_path, f'{self.__class__.__name__}_model.bin'))
-            print('model saved.')
-        torch.save(self.state_dict(),
-                   os.path.join(self.args.model_save_path, f'{self.__class__.__name__}_model.bin'))
+        # if (len(outputs) > 5) and (loss < self.min_loss):
+        #     self.min_loss = loss
+        #     torch.save(self.state_dict(),
+        #                os.path.join(self.args.model_save_path, f'{self.__class__.__name__}_model.bin'))
+        #     print('model saved.')
+        # torch.save(self.state_dict(),
+        #            os.path.join(self.args.model_save_path, f'{self.__class__.__name__}_model.bin'))
 
     def test_step(self, batch, batch_idx):
         return self.validation_step(batch, batch_idx)
@@ -243,12 +252,4 @@ class BaseCorrectorTrainingModel(pl.LightningModule):
         :param gen_fp:
         :return:
         """
-        self.corrector.load_from_transformers_state_dict(gen_fp)
-
-class SoftMaskedBertModel(BaseCorrectorTrainingModel):
-    def __init__(self, args, tokenizer):
-        super().__init__(args)
-
-
-
-
+        self.bert.load_from_transformers_state_dict(gen_fp)
