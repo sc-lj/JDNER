@@ -7,20 +7,16 @@
 import operator
 import os
 from collections import OrderedDict
-from tkinter.messagebox import NO
-
 import torch
 from torch import nn
+import numpy as np
 import pytorch_lightning as pl
 from torch.optim.lr_scheduler import LambdaLR
 from transformers import BertConfig
-from transformers.models.bert.modeling_bert import BertEncoder, BertPooler, BertOnlyMLMHead, BertModel, BertEmbeddings as bertEmbeddings
+from transformers.models.bert.modeling_bert import BertEncoder, BertPooler, BertOnlyMLMHead, BertEmbeddings as bertEmbeddings
 from transformers.modeling_outputs import BaseModelOutputWithPoolingAndCrossAttentions
 from transformers.modeling_utils import ModuleUtilsMixin
-
-from .utils import compute_corrector_prf, compute_sentence_level_prf
-import numpy as np
-
+from torchcrf import CRF
 
 class EmbeddingNetwork(nn.Module):
     def __init__(self, config, PYLEN, num_embeddings, max_sen_len=512):
@@ -95,18 +91,14 @@ class BertEmbeddings(bertEmbeddings):
 
 
 class BertModel(torch.nn.Module, ModuleUtilsMixin):
-    def __init__(self, config, tokenizer, device):
+    def __init__(self, config):
         super().__init__()
         self.config = config
         self.pyemb = EmbeddingNetwork(self.config, PYLEN=4, num_embeddings=30)
         self.skemb = EmbeddingNetwork(self.config, PYLEN=10, num_embeddings=7)
-        self.tokenizer = tokenizer
         self.embeddings = BertEmbeddings(self.config)
         self.encoder = BertEncoder(self.config)
-        self.mask_token_id = self.tokenizer.mask_token_id
-        self.pooler = BertPooler(self.config)
         self.cls = BertOnlyMLMHead(self.config)
-        self._device = device
 
     def forward(
         self,
@@ -115,7 +107,6 @@ class BertModel(torch.nn.Module, ModuleUtilsMixin):
         token_type_ids=None,
         position_ids=None,
         head_mask=None,
-        return_dict=None,
         py2ids=None,
         sk2ids=None
     ):
@@ -156,24 +147,10 @@ class BertModel(torch.nn.Module, ModuleUtilsMixin):
         encoder_outputs = self.encoder(
             embedding_output,
             attention_mask=extended_attention_mask,
-            head_mask=head_mask,
-            return_dict=return_dict,
+            head_mask=head_mask
         )
         sequence_output = encoder_outputs[0]
-        pooled_output = self.pooler(
-            sequence_output) if self.pooler is not None else None
-
-        if not return_dict:
-            return (sequence_output, pooled_output) + encoder_outputs[1:]
-
-        return BaseModelOutputWithPoolingAndCrossAttentions(
-            last_hidden_state=sequence_output,
-            pooler_output=pooled_output,
-            past_key_values=encoder_outputs.past_key_values,
-            hidden_states=encoder_outputs.hidden_states,
-            attentions=encoder_outputs.attentions,
-            cross_attentions=encoder_outputs.cross_attentions,
-        )
+        return sequence_output
 
     def load_from_transformers_state_dict(self, gen_fp):
         state_dict = OrderedDict()
@@ -182,8 +159,8 @@ class BertModel(torch.nn.Module, ModuleUtilsMixin):
             name = k
             if name.startswith('bert'):
                 name = name[5:]
-            if name.startswith('encoder'):
-                name = f'corrector.{name[8:]}'
+            # if name.startswith('encoder'):
+            #     name = f'corrector.{name[8:]}'
             if 'gamma' in name:
                 name = name.replace('gamma', 'weight')
             if 'beta' in name:
@@ -193,46 +170,35 @@ class BertModel(torch.nn.Module, ModuleUtilsMixin):
 
 
 class BaseCorrectorTrainingModel(pl.LightningModule):
-    """
-    用于CSC的BaseModel, 定义了训练及预测步骤
-    """
-
     def __init__(self, arguments, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.args = arguments
-        self.w = arguments.loss_weight
+        number_label = self.args.number_tag
+        self.config = BertConfig.from_pretrained("")
+        self.bert = BertModel(self.config)
+        self.crf = CRF(number_label,batch_first=True)
+        self._device = args.device
         self.min_loss = float('inf')
 
+    def forward(self, input_ids, input_mask, pinyin_ids,stroke_ids,lmask,labelids):
+        sequence_output = self.bert(input_ids=input_ids,attention_mask=input_mask,py2ids=pinyin_ids,sk2ids=stroke_ids)
+        # crf 训练
+        loss = self.crf(sequence_output,labelids,mask=lmask)
+        return loss
+
     def training_step(self, batch, batch_idx):
-        ori_text, cor_text, det_labels = batch
-        outputs = self.forward(ori_text, cor_text, det_labels)
-        loss = self.w * outputs[1] + (1 - self.w) * outputs[0]
+        input_ids, input_mask, pinyin_ids = batch['input_ids'],batch['input_mask'],batch['pinyin_ids']
+        stroke_ids,lmask,labelids =  batch['stroke_ids'],batch['lmask'],batch['labels']
+        loss = self.forward(input_ids, input_mask, pinyin_ids,stroke_ids,lmask,labelids)
         return loss
 
     def validation_step(self, batch, batch_idx):
-        ori_text, cor_text, det_labels = batch
-        outputs = self.forward(ori_text, cor_text, det_labels)
-        loss = self.w * outputs[1] + (1 - self.w) * outputs[0]
-        det_y_hat = (outputs[2] > 0.5).long()
-        cor_y_hat = torch.argmax((outputs[3]), dim=-1)
-        encoded_x = self.tokenizer(cor_text, padding=True, return_tensors='pt')
-        encoded_x.to(self._device)
-        cor_y = encoded_x['input_ids']
-        cor_y_hat *= encoded_x['attention_mask']
+        input_ids, input_mask, pinyin_ids = batch['input_ids'],batch['input_mask'],batch['pinyin_ids']
+        stroke_ids,lmask,labelids =  batch['stroke_ids'],batch['lmask'],batch['labels']
+        sequence_output = self.bert(input_ids=input_ids,attention_mask=input_mask,py2ids=pinyin_ids,sk2ids=stroke_ids)
+        predict_tag = self.crf.decode(sequence_output,mask=lmask)
 
-        results = []
-        det_acc_labels = []
-        cor_acc_labels = []
-        for src, tgt, predict, det_predict, det_label in zip(ori_text, cor_y, cor_y_hat, det_y_hat, det_labels):
-            _src = self.tokenizer(src, add_special_tokens=False)['input_ids']
-            _tgt = tgt[1:len(_src) + 1].cpu().numpy().tolist()
-            _predict = predict[1:len(_src) + 1].cpu().numpy().tolist()
-            cor_acc_labels.append(1 if operator.eq(_tgt, _predict) else 0)
-            det_acc_labels.append(
-                det_predict[1:len(_src) + 1].equal(det_label[1:len(_src) + 1]))
-            results.append((_src, _tgt, _predict,))
-
-        return loss.cpu().item(), det_acc_labels, cor_acc_labels, results
+        return 
 
     def on_validation_epoch_start(self) -> None:
         print('Valid.')
@@ -246,14 +212,7 @@ class BaseCorrectorTrainingModel(pl.LightningModule):
             cor_acc_labels += out[2]
             results += out[3]
         loss = np.mean([out[0] for out in outputs])
-        print(f'loss: {loss}')
-        print(f'Detection:\n'
-              f'acc: {np.mean(det_acc_labels):.4f}')
-        print(f'Correction:\n'
-              f'acc: {np.mean(cor_acc_labels):.4f}')
-        print('Char Level:')
-        compute_corrector_prf(results)
-        compute_sentence_level_prf(results)
+
         if (len(outputs) > 5) and (loss < self.min_loss):
             self.min_loss = loss
             torch.save(self.state_dict(),
@@ -277,39 +236,6 @@ class BaseCorrectorTrainingModel(pl.LightningModule):
                              last_epoch=-1)
         return [optimizer], [scheduler]
 
-
-class SoftMaskedBertModel(BaseCorrectorTrainingModel):
-    def __init__(self, args, tokenizer):
-        super().__init__(args)
-        self.args = args
-        self.tokenizer = tokenizer
-        self.corrector = BertModel(self.config, tokenizer, args.device)
-        self._device = args.device
-
-    def forward(self, texts, cor_labels=None, det_labels=None):
-        encoded_texts = self.tokenizer(
-            texts, padding=True, return_tensors='pt')
-        encoded_texts.to(self._device)
-        embed = self.corrector.embeddings(input_ids=encoded_texts['input_ids'],
-                                          token_type_ids=encoded_texts['token_type_ids'])
-        prob = self.detector(embed)
-        cor_out = self.corrector(
-            texts, prob, embed, cor_labels, residual_connection=True)
-
-        if det_labels is not None:
-            det_loss_fct = nn.BCELoss(reduction='sum')
-            # pad部分不计算损失
-            active_loss = encoded_texts['attention_mask'].view(
-                -1, prob.shape[1]) == 1
-            active_probs = prob.view(-1, prob.shape[1])[active_loss]
-            active_labels = det_labels[active_loss]
-            det_loss = det_loss_fct(active_probs, active_labels.float())
-            outputs = (det_loss, cor_out[0], prob.squeeze(-1)) + cor_out[1:]
-        else:
-            outputs = (prob.squeeze(-1),) + cor_out
-
-        return outputs
-
     def load_from_transformers_state_dict(self, gen_fp):
         """
         从transformers加载预训练权重
@@ -317,3 +243,11 @@ class SoftMaskedBertModel(BaseCorrectorTrainingModel):
         :return:
         """
         self.corrector.load_from_transformers_state_dict(gen_fp)
+
+class SoftMaskedBertModel(BaseCorrectorTrainingModel):
+    def __init__(self, args, tokenizer):
+        super().__init__(args)
+
+
+
+

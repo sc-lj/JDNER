@@ -59,25 +59,25 @@ class CorrectorDataset(Dataset):
         _tokens = []
         _labels = []
         _lmask = []
-        segment_ids = []
+        pinyin_ids = []
         stroke_ids = []
         _tokens.append("[CLS]")
         _lmask.append(0)
         _labels.append(self.label2ids["O"])
-        segment_ids.append(0)
+        pinyin_ids.append(0)
         stroke_ids.append(0)
         for token, label in zip(tokens, labels):
             _tokens.append(token.lower())
             _labels.append(self.label2ids[label])
             _lmask.append(1)
             pyid = self.pytool.get_pinyin_id(token)
-            segment_ids.append(self.PYID2SEQ[pyid,:])
+            pinyin_ids.append(self.PYID2SEQ[pyid,:])
             skid = self.sktool.get_pinyin_id(token)
             stroke_ids.append(self.SKID2SEQ[skid,:])
         _tokens.append("[SEP]")
         _labels.append(self.label2ids["O"])
         _lmask.append(0)
-        segment_ids.append(0)
+        pinyin_ids.append(0)
         stroke_ids.append(0)
         input_ids = self.tokenizer.convert_tokens_to_ids(_tokens)
 
@@ -88,12 +88,12 @@ class CorrectorDataset(Dataset):
         while len(input_ids) < self.max_sen_len:
             input_ids.append(0)
             input_mask.append(0)
-            segment_ids.append(0)
+            pinyin_ids.append(0)
             stroke_ids.append(0)
             _labels.append(labels[0])
             _lmask.append(0)
 
-        return {"input_ids":input_ids,"input_mask":input_mask,"segment_ids":segment_ids,"stroke_ids":stroke_ids,"labels":_labels,"lmask":_lmask}
+        return {"input_ids":input_ids,"input_mask":input_mask,"pinyin_ids":pinyin_ids,"stroke_ids":stroke_ids,"labels":_labels,"lmask":_lmask}
 
     def get_zi_py_matrix(self):
         pysize = 430
