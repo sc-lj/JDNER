@@ -196,9 +196,10 @@ class BaseCorrectorTrainingModel(pl.LightningModule):
         input_ids, input_mask, pinyin_ids = batch['input_ids'],batch['input_mask'],batch['pinyin_ids']
         stroke_ids,lmask,labelids =  batch['stroke_ids'],batch['lmask'],batch['labels']
         sequence_output = self.bert(input_ids=input_ids,attention_mask=input_mask,py2ids=pinyin_ids,sk2ids=stroke_ids)
+        val_loss = self.crf(sequence_output,labelids,mask=lmask)
         predict_tag = self.crf.decode(sequence_output,mask=lmask)
 
-        return 
+        return predict_tag
 
     def on_validation_epoch_start(self) -> None:
         print('Valid.')
