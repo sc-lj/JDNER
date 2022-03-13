@@ -38,7 +38,7 @@ def parse_args():
         '--bert_checkpoint', default='/mnt/disk2/PythonProgram/NLPCode/PretrainModel/chinese_bert_base', type=str)
     parser.add_argument('--model_save_path', default='checkpoint', type=str)
     parser.add_argument('--epochs', default=50, type=int, help='训练轮数')
-    parser.add_argument('--batch_size', default=10, type=int, help='批大小')
+    parser.add_argument('--batch_size', default=6, type=int, help='批大小')
     parser.add_argument('--num_workers', default=18,
                         type=int, help='多少进程用于处理数据')
     parser.add_argument('--warmup_epochs', default=8,
@@ -60,7 +60,7 @@ def parse_args():
     if not 0 <= arguments.loss_weight <= 1:
         raise ValueError(
             f"The loss weight must be in [0, 1], but get{arguments.loss_weight}")
-    print(arguments)
+    # print(arguments)
     return arguments
 
 

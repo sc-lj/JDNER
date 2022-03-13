@@ -87,9 +87,10 @@ class NerDataset(Dataset):
         stroke_ids.append(np.zeros(self.sklen))
         input_ids = self.tokenizer.convert_tokens_to_ids(_tokens)
 
+        length = len(input_ids)
         # The mask has 1 for real tokens and 0 for padding tokens. Only real
         # tokens are attended to.
-        input_mask = [1] * len(input_ids)
+        input_mask = [1] * length
         # Zero-pad up to the sequence length.
         while len(input_ids) < self.max_sen_len:
             input_ids.append(0)
@@ -100,7 +101,7 @@ class NerDataset(Dataset):
             _lmask.append(0)
         pinyin_ids = np.vstack(pinyin_ids)
         stroke_ids = np.vstack(stroke_ids)
-        return {"input_ids": input_ids, "input_mask": input_mask, "pinyin_ids": pinyin_ids, "stroke_ids": stroke_ids, "labels": _labels, "lmask": _lmask}
+        return {"input_ids": input_ids, "length": length, "input_mask": input_mask, "pinyin_ids": pinyin_ids, "stroke_ids": stroke_ids, "labels": _labels, "lmask": _lmask}
 
     def get_zi_py_matrix(self):
         pysize = 430
@@ -122,6 +123,7 @@ def collate_fn(batches):
     stroke_ids = []
     labels = []
     lmasks = []
+    lengthes = []
     for batch in batches:
         input_ids.append(batch['input_ids'])
         input_masks.append(batch['input_mask'])
@@ -129,6 +131,7 @@ def collate_fn(batches):
         stroke_ids.append(batch['stroke_ids'])
         labels.append(batch['labels'])
         lmasks.append(batch['lmask'])
+        lengthes.append(batch['length'])
 
     input_ids = torch.tensor(input_ids, dtype=torch.long)
     input_masks = torch.tensor(input_masks, dtype=torch.float32)
@@ -136,4 +139,5 @@ def collate_fn(batches):
     stroke_ids = torch.from_numpy(np.stack(stroke_ids)).type(torch.long)
     labels = torch.tensor(labels, dtype=torch.long)
     lmasks = torch.tensor(lmasks, dtype=torch.float)
-    return {"input_ids": input_ids, "input_mask": input_masks, "pinyin_ids": pinyin_ids, "stroke_ids": stroke_ids, "labels": labels, "lmask": lmasks}
+    lmasks = lmasks.type(torch.ByteTensor)
+    return {"input_ids": input_ids, "length": lengthes, "input_mask": input_masks, "pinyin_ids": pinyin_ids, "stroke_ids": stroke_ids, "labels": labels, "lmask": lmasks}

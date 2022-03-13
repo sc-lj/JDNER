@@ -4,7 +4,6 @@
 @Author :   Abtion
 @Email  :   abtion{at}outlook.com
 """
-import operator
 import os
 from collections import OrderedDict
 import torch
@@ -136,10 +135,14 @@ class BertModel(torch.nn.Module, ModuleUtilsMixin):
 
         head_mask = self.get_head_mask(
             head_mask, self.config.num_hidden_layers)
-
-        py_emb = self.pyemb(py2ids)
-        sk_emb = self.skemb(sk2ids)
-        pinyin_emb = py_emb + sk_emb
+        pinyin_emb = None
+        if py2ids is not None:
+            py_emb = self.pyemb(py2ids)
+            pinyin_emb = py_emb
+        if sk2ids is not None:
+            sk_emb = self.skemb(sk2ids)
+            if pinyin_emb is not None:
+                pinyin_emb += sk_emb
         embedding_output = self.embeddings(
             input_ids=input_ids,
             position_ids=position_ids,
@@ -188,7 +191,7 @@ class JDNerTrainingModel(pl.LightningModule):
         sequence_output = self.bert(
             input_ids=input_ids, attention_mask=input_mask, py2ids=pinyin_ids, sk2ids=stroke_ids)
         # crf 训练
-        loss = self.crf(sequence_output, labelids, mask=lmask)
+        loss = -self.crf(sequence_output, labelids, mask=lmask)
         return loss
 
     def training_step(self, batch, batch_idx):
@@ -201,27 +204,28 @@ class JDNerTrainingModel(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         input_ids, input_mask, pinyin_ids = batch['input_ids'], batch['input_mask'], batch['pinyin_ids']
         stroke_ids, lmask, labelids = batch['stroke_ids'], batch['lmask'], batch['labels']
+        length = batch['length']
         sequence_output = self.bert(
             input_ids=input_ids, attention_mask=input_mask, py2ids=pinyin_ids, sk2ids=stroke_ids)
-        lmask = lmask.type(torch.ByteTensor)
         val_loss = self.crf(sequence_output, labelids, mask=lmask)
         predict_tag = self.crf.decode(sequence_output, mask=lmask)
 
-        return predict_tag
+        return (labelids, predict_tag, val_loss, length)
 
     def on_validation_epoch_start(self) -> None:
         print('Valid.')
 
     def validation_epoch_end(self, outputs) -> None:
-        pass
-        # det_acc_labels = []
-        # cor_acc_labels = []
-        # results = []
-        # for out in outputs:
-        #     det_acc_labels += out[1]
-        #     cor_acc_labels += out[2]
-        #     results += out[3]
-        # loss = np.mean([out[0] for out in outputs])
+        target_labels = []
+        predict_labels = []
+        target_length = []
+        loss = []
+        for out in outputs:
+            target_labels.append(out[1])
+            predict_labels.append(out[2])
+            loss.append(out[3])
+            target_length.append(out[4])
+        loss = np.mean(loss)
 
         # if (len(outputs) > 5) and (loss < self.min_loss):
         #     self.min_loss = loss
