@@ -226,6 +226,7 @@ class JDNerTrainingModel(pl.LightningModule):
             loss.append(out[3])
             target_length.append(out[4])
         loss = np.mean(loss)
+        char_acc = self.word_metric(target_labels,predict_labels,target_length)
 
         # if (len(outputs) > 5) and (loss < self.min_loss):
         #     self.min_loss = loss
@@ -234,6 +235,56 @@ class JDNerTrainingModel(pl.LightningModule):
         #     print('model saved.')
         # torch.save(self.state_dict(),
         #            os.path.join(self.args.model_save_path, f'{self.__class__.__name__}_model.bin'))
+
+    def word_metric(self,target,predict,length):
+        """字符级指标计算
+
+        Args:
+            target (_type_): _description_
+            predict (_type_): _description_
+            length (_type_): _description_
+        """
+        TP = 0 # True Positive 预测为正例，实际为正例
+        FP = 0 # False Positive 预测为正例，实际为负例
+        TN = 0 # True Negative 预测为负例，实际为负例
+        FN = 0 # False Negative 预测为负例，实际为正例
+        all_words = 0
+        for t,p,l in zip(*(target,predict,length)):
+            t = t[:l]
+            p = p[:l]
+            # 完全一致的预测数量
+            TP += sum([t1==p1 for t1,p1 in zip(*(t,p))])
+            FP += sum([t1!=p1 for t1,p1 in zip(*(t,p))])
+            all_words += l
+
+        acc = TP/all_words
+        return acc
+
+
+    def entity_metric(self,target,predict,length):
+        """实体级的指标计算
+
+        Args:
+            target (_type_): _description_
+            predict (_type_): _description_
+            length (_type_): _description_
+        """
+        gold_number = 0
+        pred_number = 0
+        correct_num = 0
+
+        for t,p,l in zip(*(target,predict,length)):
+            t = t[:l]
+            p = p[:l]
+    
+
+    def build_entity(self,tags):
+        """构建实体span
+
+        Args:
+            tags (_type_): _description_
+        """
+        
 
     def test_step(self, batch, batch_idx):
         return self.validation_step(batch, batch_idx)
