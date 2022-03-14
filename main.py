@@ -43,7 +43,7 @@ def parse_args():
                         type=int, help='多少进程用于处理数据')
     parser.add_argument('--warmup_epochs', default=8,
                         type=int, help='warmup轮数, 需小于训练轮数')
-    parser.add_argument('--lr', default=1e-4, type=float, help='学习率')
+    parser.add_argument('--lr', default=1e-5, type=float, help='学习率')
     parser.add_argument('--accumulate_grad_batches',
                         default=16,
                         type=int,
