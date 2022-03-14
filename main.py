@@ -52,6 +52,12 @@ def parse_args():
                         help='代码运行模式，以此来控制训练测试或数据预处理，one of [train, test]')
     parser.add_argument('--loss_weight', default=0.8,
                         type=float, help='论文中的lambda，即correction loss的权重')
+    parser.add_argument(
+        "--label_file", default="data/label2ids.json", help="实体标签id", type=str)
+    parser.add_argument(
+        "--train_file", default="data/train.json", help="训练数据集")
+    parser.add_argument(
+        "--val_file", default="data/val.json", help="训练数据集")
     arguments = parser.parse_args()
     if arguments.hard_device == 'cpu':
         arguments.device = torch.device(arguments.hard_device)
@@ -67,11 +73,11 @@ def parse_args():
 def main():
     args = parse_args()
 
-    train_data = NerDataset("data/train.json", args.bert_checkpoint)
+    train_data = NerDataset(args.train_file, args)
     train_loader = DataLoader(train_data, batch_size=args.batch_size,
                               shuffle=True, num_workers=args.num_workers, collate_fn=collate_fn)
 
-    val_data = NerDataset("data/val.json", args.bert_checkpoint)
+    val_data = NerDataset(args.val_file, args)
     valid_loader = DataLoader(val_data, batch_size=args.batch_size,
                               shuffle=False, num_workers=args.num_workers, collate_fn=collate_fn)
 

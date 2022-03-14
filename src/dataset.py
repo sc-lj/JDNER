@@ -4,6 +4,7 @@
 @Author :   Abtion
 @Email  :   abtion{at}outlook.com
 """
+from ast import arg
 import torch
 import json
 import numpy as np
@@ -14,7 +15,7 @@ from transformers.models.bert.tokenization_bert import BertTokenizer
 
 
 class NerDataset(Dataset):
-    def __init__(self, fp, pretain_path):
+    def __init__(self, fp, args):
         self.data = load_json(fp)
         self.space_char = "[unused1]"
 
@@ -22,12 +23,12 @@ class NerDataset(Dataset):
         py_vocab_path = './pinyin_data/py_vocab.txt'
         sk_dict_path = './stroke_data/zi_sk.txt'
         sk_vocab_path = './stroke_data/sk_vocab.txt'
-        label2id_path = "data/label2ids.json"
+        label2id_path = args.label_file
         with open(label2id_path, 'r') as f:
             self.label2ids = json.load(f)
 
         self.number_tag = len(self.label2ids)
-        self.tokenizer = BertTokenizer.from_pretrained(pretain_path)
+        self.tokenizer = BertTokenizer.from_pretrained(args.bert_checkpoint)
 
         self.pytool = PinyinTool(
             py_dict_path=py_dict_path, py_vocab_path=py_vocab_path, py_or_sk='py')

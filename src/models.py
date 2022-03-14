@@ -5,6 +5,7 @@
 @Email  :   abtion{at}outlook.com
 """
 import os
+import json
 from collections import OrderedDict
 import torch
 from torch import nn
@@ -92,8 +93,9 @@ class BertEmbeddings(bertEmbeddings):
 
 
 class BertModel(torch.nn.Module, ModuleUtilsMixin):
-    def __init__(self, config, PYLEN, SKLEN, num_labels):
+    def __init__(self, config, num_labels, args):
         super().__init__()
+        PYLEN, SKLEN = args.pylen, args.sklen
         self.config = config
         self.pyemb = EmbeddingNetwork(
             self.config, PYLEN=PYLEN, num_embeddings=30)
@@ -180,14 +182,17 @@ class JDNerTrainingModel(pl.LightningModule):
         super().__init__()
         self.args = arguments
         num_labels = self.args.number_tag
-        PYLEN, SKLEN = self.args.pylen, self.args.sklen
+        label2id_path = self.args.label_file
+        with open(label2id_path, 'r') as f:
+            label2ids = json.load(f)
+        self.id2label = {v: k for k, v in label2ids.items()}
         self.config = BertConfig.from_pretrained(self.args.bert_checkpoint)
-        self.bert = BertModel(self.config, PYLEN, SKLEN, num_labels)
+        self.bert = BertModel(self.config, num_labels, arguments)
         self.crf = CRF(num_labels, batch_first=True)
         self._device = self.args.device
         self.min_loss = float('inf')
 
-    def forward(self, input_ids, input_mask, pinyin_ids, stroke_ids, lmask, labelids):
+    def forward(self, input_ids, input_mask, pinyin_ids=None, stroke_ids=None, lmask=None, labelids=None):
         sequence_output = self.bert(
             input_ids=input_ids, attention_mask=input_mask, py2ids=pinyin_ids, sk2ids=stroke_ids)
         # crf 训练
@@ -197,8 +202,9 @@ class JDNerTrainingModel(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         input_ids, input_mask, pinyin_ids = batch['input_ids'], batch['input_mask'], batch['pinyin_ids']
         stroke_ids, lmask, labelids = batch['stroke_ids'], batch['lmask'], batch['labels']
+        # loss = self.forward(input_ids, input_mask,pinyin_ids, stroke_ids, lmask, labelids)
         loss = self.forward(input_ids, input_mask,
-                            pinyin_ids, stroke_ids, lmask, labelids)
+                            lmask=lmask, labelids=labelids)
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -206,10 +212,11 @@ class JDNerTrainingModel(pl.LightningModule):
         stroke_ids, lmask, labelids = batch['stroke_ids'], batch['lmask'], batch['labels']
         length = batch['length']
         sequence_output = self.bert(
-            input_ids=input_ids, attention_mask=input_mask, py2ids=pinyin_ids, sk2ids=stroke_ids)
+            input_ids=input_ids, attention_mask=input_mask, py2ids=None, sk2ids=None)
         val_loss = self.crf(sequence_output, labelids, mask=lmask)
         predict_tag = self.crf.decode(sequence_output, mask=lmask)
-
+        val_loss = val_loss.cpu().detach().numpy()
+        labelids = labelids.cpu().detach().numpy()
         return (labelids, predict_tag, val_loss, length)
 
     def on_validation_epoch_start(self) -> None:
@@ -221,47 +228,45 @@ class JDNerTrainingModel(pl.LightningModule):
         target_length = []
         loss = []
         for out in outputs:
-            target_labels.append(out[1])
-            predict_labels.append(out[2])
-            loss.append(out[3])
-            target_length.append(out[4])
+            target_labels.extend(out[0])
+            predict_labels.extend(out[1])
+            loss.append(out[2])
+            target_length.extend(out[3])
         loss = np.mean(loss)
-        char_acc = self.word_metric(target_labels,predict_labels,target_length)
+        char_acc = self.word_metric(
+            target_labels, predict_labels, target_length)
 
-        # if (len(outputs) > 5) and (loss < self.min_loss):
-        #     self.min_loss = loss
-        #     torch.save(self.state_dict(),
-        #                os.path.join(self.args.model_save_path, f'{self.__class__.__name__}_model.bin'))
-        #     print('model saved.')
-        # torch.save(self.state_dict(),
-        #            os.path.join(self.args.model_save_path, f'{self.__class__.__name__}_model.bin'))
+        precision, recall, f1 = self.entity_metric(
+            target_labels, predict_labels, target_length)
+        self.log("char_acc", char_acc, prog_bar=True)
+        self.log("pre", precision)
+        self.log("recall", recall)
+        self.log("f1", f1, prog_bar=True)
 
-    def word_metric(self,target,predict,length):
+    def word_metric(self, target, predict, length):
         """字符级指标计算
-
         Args:
             target (_type_): _description_
             predict (_type_): _description_
             length (_type_): _description_
         """
-        TP = 0 # True Positive 预测为正例，实际为正例
-        FP = 0 # False Positive 预测为正例，实际为负例
-        TN = 0 # True Negative 预测为负例，实际为负例
-        FN = 0 # False Negative 预测为负例，实际为正例
+        TP = 0  # True Positive 预测为正例，实际为正例
+        FP = 0  # False Positive 预测为正例，实际为负例
+        TN = 0  # True Negative 预测为负例，实际为负例
+        FN = 0  # False Negative 预测为负例，实际为正例
         all_words = 0
-        for t,p,l in zip(*(target,predict,length)):
+        for t, p, l in zip(*(target, predict, length)):
             t = t[:l]
             p = p[:l]
             # 完全一致的预测数量
-            TP += sum([t1==p1 for t1,p1 in zip(*(t,p))])
-            FP += sum([t1!=p1 for t1,p1 in zip(*(t,p))])
+            TP += sum([t1 == p1 for t1, p1 in zip(*(t, p))])
+            FP += sum([t1 != p1 for t1, p1 in zip(*(t, p))])
             all_words += l
 
         acc = TP/all_words
         return acc
 
-
-    def entity_metric(self,target,predict,length):
+    def entity_metric(self, target, predict, length):
         """实体级的指标计算
 
         Args:
@@ -273,18 +278,52 @@ class JDNerTrainingModel(pl.LightningModule):
         pred_number = 0
         correct_num = 0
 
-        for t,p,l in zip(*(target,predict,length)):
+        for t, p, l in zip(*(target, predict, length)):
             t = t[:l]
+            l_tag = [self.id2label[line] for line in t]
+            l_tags = self.build_entity(l_tag)
             p = p[:l]
-    
+            p_tag = [self.id2label[line] for line in p]
+            p_tags = self.build_entity(p_tag)
+            pred_number += len(p_tags)
+            gold_number += len(l_tags)
+            for p_tag, p_start, p_end in p_tags:
+                if any([p_tag == t_tag and p_start == t_start and p_end == t_end for t_tag, t_start, t_end in l_tags]):
+                    correct_num += 1
+        precision = 0
+        if pred_number != 0:
+            precision = correct_num/pred_number
+        recall = correct_num / gold_number
+        f1 = 0
+        if precision+recall != 0:
+            f1 = 2*precision*recall/(precision+recall)
+        return precision, recall, f1
 
-    def build_entity(self,tags):
+    def build_entity(self, tags):
         """构建实体span
 
         Args:
             tags (_type_): _description_
         """
-        
+        entities = []
+        tmp_ent = ""
+        start = 0
+        for index, tag in enumerate(tags):
+            if tag.startswith("B"):
+                if tmp_ent:
+                    entities.append((tmp_ent, start, index))
+                    tmp_ent = ""
+                start = index
+                tmp_ent = tag[2:]
+            elif tag.startswith("O"):
+                if tmp_ent:
+                    entities.append((tmp_ent, start, index))
+                    tmp_ent = ""
+                start = index
+        if tmp_ent:
+            entities.append((tmp_ent, start, index))
+            tmp_ent = ""
+        return entities
 
     def test_step(self, batch, batch_idx):
         return self.validation_step(batch, batch_idx)
