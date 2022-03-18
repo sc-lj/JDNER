@@ -9,13 +9,14 @@ import torch
 import json
 import numpy as np
 from torch.utils.data import Dataset, DataLoader
-from .utils import load_json
-from src.pinyin_tool import PinyinTool
+from utils import load_json
+from pinyin_tool import PinyinTool
 from transformers.models.bert.tokenization_bert import BertTokenizer
 
 
 class NerDataset(Dataset):
     def __init__(self, fp, args):
+        super().__init__()
         self.data = load_json(fp)
         self.space_char = "[unused1]"
 

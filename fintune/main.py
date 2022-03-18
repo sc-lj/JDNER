@@ -4,15 +4,17 @@
 @Author :   Abtion
 @Email  :   abtion{at}outlook.com
 """
+from transformers import BertConfig
+from models import BertModel
 import argparse
 import os
 from pyparsing import col
 import torch
 import pytorch_lightning as pl
-from src.dataset import NerDataset, collate_fn
+from dataset import NerDataset, collate_fn
 from torch.utils.data import DataLoader
-from src.models import JDNerTrainingModel
-from src.utils import get_abs_path
+from models import JDNerTrainingModel
+from utils import get_abs_path
 
 
 def str2bool(v):
@@ -92,8 +94,8 @@ def main():
                          )
     model = JDNerTrainingModel(args)
     # model.load_from_transformers_state_dict(get_abs_path('checkpoint', 'pytorch_model.bin'))
-    model.load_from_transformers_state_dict(
-        os.path.join(args.bert_checkpoint, 'pytorch_model.bin'))
+    # model.load_from_transformers_state_dict(os.path.join(args.bert_checkpoint, 'pytorch_model.bin'))
+    model.load_from_transformers_state_dict("data/new_init.pt")
     if args.load_checkpoint:
         model.load_state_dict(torch.load(get_abs_path('checkpoint', f'{model.__class__.__name__}_model.bin'),
                                          map_location=args.hard_device))
@@ -107,3 +109,14 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+    # from models import BertModel
+    # from transformers import BertConfig
+    # args = parse_args()
+    # config = BertConfig.from_pretrained(args.bert_checkpoint)
+    # args.number_tag = 81
+    # args.pylen, args.sklen = 4, 10
+    # model = BertModel(config, args)
+
+    # print(model)
+    # print()

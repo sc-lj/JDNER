@@ -23,17 +23,17 @@ class EmbeddingNetwork(nn.Module):
     def __init__(self, config, PYLEN, num_embeddings, max_sen_len=512):
         super().__init__()
         self.config = config
-        self.PYDIM = 30
+        self.PYDIM = 32
         self.seq_len = PYLEN
         num_embeddings = num_embeddings
         self.pyemb = nn.Embedding(num_embeddings, self.PYDIM)
-        self.gru = nn.GRU(
+        self.GRU = nn.GRU(
             self.PYDIM,
             self.config.hidden_size,
             num_layers=1,
             batch_first=True,
             dropout=self.config.hidden_dropout_prob,
-            bidirectional=True,
+            bidirectional=False,
         )
         self.MAX_SEN_LEN = max_sen_len
 
@@ -41,7 +41,7 @@ class EmbeddingNetwork(nn.Module):
         sen_pyids = sen_pyids.reshape(-1, self.seq_len)
         sen_emb = self.pyemb(sen_pyids)
         sen_emb = sen_emb.reshape(-1, self.seq_len, self.PYDIM)
-        all_out, final_out = self.gru(sen_emb)
+        all_out, final_out = self.GRU(sen_emb)
         final_out = final_out.mean(0, keepdim=True)
         lstm_output = final_out.reshape(
             shape=[-1, self.MAX_SEN_LEN, self.config.hidden_size])
@@ -93,16 +93,17 @@ class BertEmbeddings(bertEmbeddings):
 
 
 class BertModel(torch.nn.Module, ModuleUtilsMixin):
-    def __init__(self, config, num_labels, args):
+    def __init__(self, config, args):
         super().__init__()
         PYLEN, SKLEN = args.pylen, args.sklen
         self.config = config
-        self.pyemb = EmbeddingNetwork(
+        self.py_emb = EmbeddingNetwork(
             self.config, PYLEN=PYLEN, num_embeddings=30)
-        self.skemb = EmbeddingNetwork(
+        self.sk_emb = EmbeddingNetwork(
             self.config, PYLEN=SKLEN, num_embeddings=7)
         self.embeddings = BertEmbeddings(self.config)
         self.encoder = BertEncoder(self.config)
+        num_labels = args.number_tag
         self.cls = nn.Linear(config.hidden_size, num_labels)
 
     def forward(
@@ -139,10 +140,10 @@ class BertModel(torch.nn.Module, ModuleUtilsMixin):
             head_mask, self.config.num_hidden_layers)
         pinyin_emb = None
         if py2ids is not None:
-            py_emb = self.pyemb(py2ids)
+            py_emb = self.py_emb(py2ids)
             pinyin_emb = py_emb
         if sk2ids is not None:
-            sk_emb = self.skemb(sk2ids)
+            sk_emb = self.sk_emb(sk2ids)
             if pinyin_emb is not None:
                 pinyin_emb += sk_emb
         embedding_output = self.embeddings(
@@ -181,13 +182,15 @@ class JDNerTrainingModel(pl.LightningModule):
     def __init__(self, arguments):
         super().__init__()
         self.args = arguments
+        self.save_hyperparameters(arguments)
         num_labels = self.args.number_tag
         label2id_path = self.args.label_file
         with open(label2id_path, 'r') as f:
             label2ids = json.load(f)
         self.id2label = {v: k for k, v in label2ids.items()}
         self.config = BertConfig.from_pretrained(self.args.bert_checkpoint)
-        self.bert = BertModel(self.config, num_labels, arguments)
+        self.bert = BertModel(self.config, arguments)
+        # torch.save(self.bert.state_dict(), "data/init.pt")
         self.crf = CRF(num_labels, batch_first=True)
         self._device = self.args.device
         self.min_loss = float('inf')
@@ -202,15 +205,17 @@ class JDNerTrainingModel(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         input_ids, input_mask, pinyin_ids = batch['input_ids'], batch['input_mask'], batch['pinyin_ids']
         stroke_ids, lmask, labelids = batch['stroke_ids'], batch['lmask'], batch['labels']
-        # loss = self.forward(input_ids, input_mask,pinyin_ids, stroke_ids, lmask, labelids)
         loss = self.forward(input_ids, input_mask,
-                            lmask=lmask, labelids=labelids)
+                            pinyin_ids, stroke_ids, lmask, labelids)
+        # loss = self.forward(input_ids, input_mask,
+        #                     lmask=lmask, labelids=labelids)
         return loss
 
     def validation_step(self, batch, batch_idx):
         input_ids, input_mask, pinyin_ids = batch['input_ids'], batch['input_mask'], batch['pinyin_ids']
         stroke_ids, lmask, labelids = batch['stroke_ids'], batch['lmask'], batch['labels']
         length = batch['length']
+        # sequence_output = self.bert(input_ids=input_ids, attention_mask=input_mask, py2ids=pinyin_ids, sk2ids=stroke_ids)
         sequence_output = self.bert(
             input_ids=input_ids, attention_mask=input_mask, py2ids=None, sk2ids=None)
         val_loss = self.crf(sequence_output, labelids, mask=lmask)
