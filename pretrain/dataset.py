@@ -122,7 +122,7 @@ class NerDataset(Dataset):
         _tokens.append("[CLS]")
         _lmask.append(0)
         # _labels.append(self.label2ids["O"])
-        pinyin_ids.append(np.zeros(self.pylen))
+        pinyin_ids.append(1)  # [UNK]
         # stroke_ids.append(np.zeros(self.sklen))
         for token in tokens:
             if len(token.strip()) == 0:
@@ -131,13 +131,14 @@ class NerDataset(Dataset):
             # _labels.append(self.label2ids[label])
             _lmask.append(1)
             pyid = self.pytool.get_pinyin_id(token)
-            pinyin_ids.append(self.PYID2SEQ[pyid, :])
+            pinyin_ids.append(pyid)
+            # pinyin_ids.append(self.PYID2SEQ[pyid, :])
             # skid = self.sktool.get_pinyin_id(token)
             # stroke_ids.append(self.SKID2SEQ[skid, :])
         _tokens.append("[SEP]")
         # _labels.append(self.label2ids["O"])
         _lmask.append(0)
-        pinyin_ids.append(np.zeros(self.pylen))
+        pinyin_ids.append(1)  # [UNK]
         # stroke_ids.append(np.zeros(self.sklen))
         input_ids = self.tokenizer.convert_tokens_to_ids(_tokens)
 
@@ -149,14 +150,18 @@ class NerDataset(Dataset):
         while len(input_ids) < self.max_sen_len:
             input_ids.append(0)
             input_mask.append(0)
-            pinyin_ids.append(np.zeros(self.pylen))
+            pinyin_ids.append(1)  # [UNK]
             # stroke_ids.append(np.zeros(self.sklen))
             # _labels.append(self.label2ids["O"])
             _lmask.append(0)
-        pinyin_ids = np.vstack(pinyin_ids)
+        # pinyin_ids = np.vstack(pinyin_ids)
         # stroke_ids = np.vstack(stroke_ids)
         masked_ids, masked_flgs, masked_py_ids, masked_sk_ids = self.masker.mask_process(
             input_ids)
+        masked_py_ids = np.array([self.PYID2SEQ[pyid, :]
+                                 for pyid in masked_py_ids])
+        masked_sk_ids = np.array([self.SKID2SEQ[skid, :]
+                                 for skid in masked_sk_ids])
         lmask = masked_flgs*np.array(_lmask)
         label_ids = input_ids
         input_ids = masked_ids
@@ -196,15 +201,15 @@ def collate_fn(batches):
         lmasks.append(batch['lmask'])
         lengthes.append(batch['length'])
 
-    input_ids = torch.tensor(input_ids, dtype=torch.long)
+    input_ids = torch.tensor(np.array(input_ids), dtype=torch.long)
     input_masks = torch.tensor(input_masks, dtype=torch.float32)
     pinyin_ids = torch.from_numpy(np.stack(pinyin_ids)).type(torch.long)
     masked_pinyin_ids = torch.from_numpy(
-        np.stack(masked_pinyin_ids)).type(torch.float32)
+        np.stack(masked_pinyin_ids)).type(torch.long)
     masked_sk_ids = torch.from_numpy(
-        np.stack(masked_sk_ids)).type(torch.float32)
-    labels = torch.tensor(labels, dtype=torch.float)
-    lmasks = torch.tensor(lmasks, dtype=torch.float)
+        np.stack(masked_sk_ids)).type(torch.long)
+    labels = torch.tensor(labels, dtype=torch.long)
+    lmasks = torch.tensor(np.array(lmasks), dtype=torch.float)
     # lmasks = lmasks.type(torch.ByteTensor)
     return {"input_ids": input_ids, "length": lengthes, "input_mask": input_masks, "pinyin_ids": pinyin_ids, "masked_pinyin_ids": masked_pinyin_ids,
             "masked_sk_ids": masked_sk_ids, "labels": labels, "lmask": lmasks}

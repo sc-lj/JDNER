@@ -100,7 +100,7 @@ class Mask(object):
             self.config['stroke'] + self.config['random']
         self.keep_thr = self.config['same_py'] + self.config['simi_py'] + \
             self.config['stroke'] + self.config['random'] + self.config['keep']
-        self.invalid_ids = set([self.same_py_confusion.tokenizer.vocab.get('UNK'),
+        self.invalid_ids = set([self.same_py_confusion.tokenizer.vocab.get('[PAD]'),
                                self.same_py_confusion.tokenizer.vocab.get(
                                    '[CLS]'),
                                self.same_py_confusion.tokenizer.vocab.get(

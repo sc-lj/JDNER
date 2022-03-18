@@ -4,11 +4,12 @@
 @Author :   Abtion
 @Email  :   abtion{at}outlook.com
 """
+from cmath import log
 import os
 import json
 from collections import OrderedDict
 import torch
-from torch import nn
+from torch import logit, nn
 import numpy as np
 import pytorch_lightning as pl
 from torch.optim.lr_scheduler import LambdaLR
@@ -25,7 +26,6 @@ class EmbeddingNetwork(nn.Module):
         self.config = config
         self.PYDIM = 30
         self.seq_len = PYLEN
-        num_embeddings = num_embeddings
         self.pyemb = nn.Embedding(num_embeddings, self.PYDIM)
         self.gru = nn.GRU(
             self.PYDIM,
@@ -198,12 +198,16 @@ class JDNerTrainingModel(pl.LightningModule):
         sequence_output = self.bert(
             input_ids=input_ids, attention_mask=input_mask, py2ids=masked_pinyin_ids, sk2ids=masked_sk_ids)
         lmask = ~lmask.type(torch.bool)
-        labelids = torch.masked_select(labelids, lmask, torch.tensor(-100))
-        pinyin_ids = torch.masked_select(
+        labelids = torch.masked_fill(labelids, lmask, torch.tensor(-100))
+        labelids = labelids.reshape(-1)
+        pinyin_ids = torch.masked_fill(
             pinyin_ids, lmask, torch.tensor(-100))
+        pinyin_ids = pinyin_ids.reshape(-1)
         logits = self.cls(sequence_output)
+        logits = logits.reshape(-1, self.args.num_labels)
         loss = self.loss_function(logits, labelids)
         py_logit = self.py_cls(sequence_output)
+        py_logit = py_logit.reshape(-1, self.args.py_num_labels)
         py_loss = self.py_loss_function(py_logit, pinyin_ids)
         return loss + py_loss
 
