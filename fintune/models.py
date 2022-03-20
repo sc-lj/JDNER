@@ -17,6 +17,7 @@ from transformers.models.bert.modeling_bert import BertEncoder, BertPooler, Bert
 from transformers.modeling_outputs import BaseModelOutputWithPoolingAndCrossAttentions
 from transformers.modeling_utils import ModuleUtilsMixin
 from torchcrf import CRF
+from AdTraings import PGD, FGM
 
 
 class EmbeddingNetwork(nn.Module):
@@ -103,8 +104,6 @@ class BertModel(torch.nn.Module, ModuleUtilsMixin):
             self.config, PYLEN=SKLEN, num_embeddings=7)
         self.embeddings = BertEmbeddings(self.config)
         self.encoder = BertEncoder(self.config)
-        num_labels = args.number_tag
-        self.cls = nn.Linear(config.hidden_size, num_labels)
 
     def forward(
         self,
@@ -158,16 +157,61 @@ class BertModel(torch.nn.Module, ModuleUtilsMixin):
             head_mask=head_mask
         )
         sequence_output = encoder_outputs[0]
-        logits = self.cls(sequence_output)
-        return logits
+        return sequence_output
+
+
+class JDNerModel(nn.Module):
+    def __init__(self, args) -> None:
+        super().__init__()
+        self.args = args
+        self.config = BertConfig.from_pretrained(self.args.bert_checkpoint)
+        self.bert = BertModel(self.config, args)
+        num_labels = self.args.number_tag
+        self.add_lstm = self.args.lstm
+        if self.add_lstm:
+            self.is_bilstm = self.args.is_bilstm
+            self.lstm_hidden = self.args.lstm_hidden
+            self.lstm = nn.LSTM(self.config.hidden_size, self.lstm_hidden,
+                                batch_first=True, bidirectional=self.is_bilstm, dropout=0.5)
+            linear_hidden = self.lstm_hidden*2 if self.is_bilstm else self.lstm_hidden
+        else:
+            linear_hidden = self.config.hidden_size
+        self.cls = nn.Linear(linear_hidden, num_labels)
+        self.crf = CRF(num_labels, batch_first=True)
+
+    def forward(self, input_ids, input_mask, pinyin_ids=None, stroke_ids=None, lmask=None, labelids=None):
+        sequence_output = self.bert(
+            input_ids=input_ids, attention_mask=input_mask, py2ids=pinyin_ids, sk2ids=stroke_ids)
+        if self.add_lstm:
+            sequence_output, _ = self.lstm(sequence_output)
+        cls_output = self.cls(sequence_output)
+        # crf 训练
+        loss = -self.crf(cls_output, labelids, mask=lmask)
+        return loss
+
+    def decode(self, input_ids, input_mask, pinyin_ids=None, stroke_ids=None, lmask=None, labelids=None):
+        sequence_output = self.bert(
+            input_ids=input_ids, attention_mask=input_mask, py2ids=pinyin_ids, sk2ids=stroke_ids)
+        if self.add_lstm:
+            sequence_output, _ = self.lstm(sequence_output)
+        cls_output = self.cls(sequence_output)
+        # crf 训练
+        loss = -self.crf(cls_output, labelids, mask=lmask)
+        predict_tag = self.crf.decode(cls_output, mask=lmask)
+        return predict_tag, loss
 
     def load_from_transformers_state_dict(self, gen_fp):
+        """
+        从transformers加载预训练权重
+        :param gen_fp:
+        :return:
+        """
         state_dict = OrderedDict()
         gen_state_dict = torch.load(gen_fp)
         for k, v in gen_state_dict.items():
             name = k
-            if name.startswith('bert'):
-                name = name[5:]
+            # if name.startswith('bert'):
+            #     name = name[5:]
             # if name.startswith('encoder'):
             #     name = f'corrector.{name[8:]}'
             if 'gamma' in name:
@@ -188,38 +232,85 @@ class JDNerTrainingModel(pl.LightningModule):
         with open(label2id_path, 'r') as f:
             label2ids = json.load(f)
         self.id2label = {v: k for k, v in label2ids.items()}
-        self.config = BertConfig.from_pretrained(self.args.bert_checkpoint)
-        self.bert = BertModel(self.config, arguments)
+        self.model = JDNerModel(arguments)
         # torch.save(self.bert.state_dict(), "data/init.pt")
-        self.crf = CRF(num_labels, batch_first=True)
-        self._device = self.args.device
-        self.min_loss = float('inf')
+        self.adv = arguments.adv
+        if self.adv == "fgm":
+            self.adv_model = FGM(self.model)
+            # 加了对抗学习，要关闭LightningModule模块的自动优化功能
+            self.automatic_optimization = False
+        elif self.adv == 'pgd':
+            self.adv_model = PGD(self.model)
+            self.automatic_optimization = False
 
     def forward(self, input_ids, input_mask, pinyin_ids=None, stroke_ids=None, lmask=None, labelids=None):
-        sequence_output = self.bert(
-            input_ids=input_ids, attention_mask=input_mask, py2ids=pinyin_ids, sk2ids=stroke_ids)
-        # crf 训练
-        loss = -self.crf(sequence_output, labelids, mask=lmask)
+        loss = self.model(input_ids, input_mask, pinyin_ids,
+                          stroke_ids, lmask, labelids)
         return loss
+
+    def adv_fgm_model(self, fgm_model, input_ids, input_mask, pinyin_ids=None, stroke_ids=None, lmask=None, labelids=None):
+        # 对抗训练
+        fgm_model.attack()  # 在embedding上添加对抗扰动
+        # crf 训练
+        loss_adv = self.model(input_ids, input_mask, pinyin_ids,
+                              stroke_ids, lmask, labelids)
+        self.manual_backward(loss_adv)
+        fgm_model.restore()
+        return loss_adv.item()
+
+    def adv_pgd_model(self, pgd_model, input_ids, input_mask, pinyin_ids=None, stroke_ids=None, lmask=None, labelids=None):
+        pgd_model.backup_grad()
+        K = self.args.pgd_K
+        # 对抗训练
+        loss_advs = []
+        for t in range(K):
+            # 在embedding上添加对抗扰动, first attack时备份param.data
+            pgd_model.attack(is_first_attack=(t == 0))
+            if t != K - 1:
+                self.model.zero_grad()
+            else:
+                pgd_model.restore_grad()
+
+            # crf 训练
+            loss_adv = self.model(input_ids, input_mask, pinyin_ids,
+                                  stroke_ids, lmask, labelids)
+            self.manual_backward(loss_adv)  # 反向传播，并在正常的grad基础上，累加对抗训练的梯度
+            loss_advs.append(loss_adv.item())
+        pgd_model.restore()  #
+        return np.array(loss_advs).mean()
 
     def training_step(self, batch, batch_idx):
         input_ids, input_mask, pinyin_ids = batch['input_ids'], batch['input_mask'], batch['pinyin_ids']
         stroke_ids, lmask, labelids = batch['stroke_ids'], batch['lmask'], batch['labels']
-        loss = self.forward(input_ids, input_mask,
-                            pinyin_ids, stroke_ids, lmask, labelids)
-        # loss = self.forward(input_ids, input_mask,
-        #                     lmask=lmask, labelids=labelids)
+
+        if not self.automatic_optimization:
+            opt = self.optimizers()
+            scheduler = self.lr_schedulers()
+            opt.zero_grad()
+
+        # loss = self.model(input_ids, input_mask,
+        #                     pinyin_ids, stroke_ids, lmask, labelids)
+        loss = self.model(input_ids, input_mask,
+                          lmask=lmask, labelids=labelids)
+        if not self.automatic_optimization:
+            self.manual_backward(loss)
+            opt.step()
+            scheduler.step()
+        if self.adv == "fgm":
+            self.adv_loss = self.adv_fgm_model(self.adv_model, input_ids, input_mask,
+                                               lmask=lmask, labelids=labelids)
+        elif self.adv == 'pgd':
+            self.adv_loss = self.adv_pgd_model(self.adv_model, input_ids, input_mask,
+                                               lmask=lmask, labelids=labelids)
         return loss
 
     def validation_step(self, batch, batch_idx):
         input_ids, input_mask, pinyin_ids = batch['input_ids'], batch['input_mask'], batch['pinyin_ids']
         stroke_ids, lmask, labelids = batch['stroke_ids'], batch['lmask'], batch['labels']
         length = batch['length']
-        # sequence_output = self.bert(input_ids=input_ids, attention_mask=input_mask, py2ids=pinyin_ids, sk2ids=stroke_ids)
-        sequence_output = self.bert(
-            input_ids=input_ids, attention_mask=input_mask, py2ids=None, sk2ids=None)
-        val_loss = self.crf(sequence_output, labelids, mask=lmask)
-        predict_tag = self.crf.decode(sequence_output, mask=lmask)
+        # sequence_output = self.model.decode(input_ids=input_ids, attention_mask=input_mask, py2ids=pinyin_ids, sk2ids=stroke_ids)
+        predict_tag, val_loss = self.model.decode(input_ids, input_mask,
+                                                  lmask=lmask, labelids=labelids)
         val_loss = val_loss.cpu().detach().numpy()
         labelids = labelids.cpu().detach().numpy()
         return (labelids, predict_tag, val_loss, length)
@@ -351,4 +442,4 @@ class JDNerTrainingModel(pl.LightningModule):
         :param gen_fp:
         :return:
         """
-        self.bert.load_from_transformers_state_dict(gen_fp)
+        self.model.load_from_transformers_state_dict(gen_fp)

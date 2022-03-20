@@ -90,8 +90,7 @@ class NerDataset(Dataset):
         input_ids = self.tokenizer.convert_tokens_to_ids(_tokens)
 
         length = len(input_ids)
-        # The mask has 1 for real tokens and 0 for padding tokens. Only real
-        # tokens are attended to.
+        # The mask has 1 for real tokens and 0 for padding tokens. Only real tokens are attended to.
         input_mask = [1] * length
         # Zero-pad up to the sequence length.
         while len(input_ids) < self.max_sen_len:

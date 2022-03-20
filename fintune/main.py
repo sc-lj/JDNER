@@ -4,6 +4,7 @@
 @Author :   Abtion
 @Email  :   abtion{at}outlook.com
 """
+from gc import callbacks
 from transformers import BertConfig
 from models import BertModel
 import argparse
@@ -15,6 +16,7 @@ from dataset import NerDataset, collate_fn
 from torch.utils.data import DataLoader
 from models import JDNerTrainingModel
 from utils import get_abs_path
+from pytorch_lightning.callbacks import ModelCheckpoint
 
 
 def str2bool(v):
@@ -45,6 +47,14 @@ def parse_args():
                         type=int, help='多少进程用于处理数据')
     parser.add_argument('--warmup_epochs', default=8,
                         type=int, help='warmup轮数, 需小于训练轮数')
+    parser.add_argument('--is_bilstm', default=True,
+                        type=bool, help='是否采用双向LSTM')
+    parser.add_argument('--lstm_hidden', default=200,
+                        type=int, help='定义LSTM的输出向量')
+    parser.add_argument('--lstm', default=False,
+                        type=bool, help='是否添加LSTM模块')
+    parser.add_argument('--adv', default=None,
+                        choices=[None, "fgm", "pgd"], help='对抗学习模块')
     parser.add_argument('--lr', default=1e-5, type=float, help='学习率')
     parser.add_argument('--accumulate_grad_batches',
                         default=16,
@@ -61,10 +71,10 @@ def parse_args():
     parser.add_argument(
         "--val_file", default="data/val.json", help="训练数据集")
     arguments = parser.parse_args()
-    if arguments.hard_device == 'cpu':
-        arguments.device = torch.device(arguments.hard_device)
-    else:
-        arguments.device = torch.device(f'cuda:{arguments.gpu_index}')
+    # if arguments.hard_device == 'cpu':
+    #     arguments.device = torch.device(arguments.hard_device)
+    # else:
+    #     arguments.device = torch.device(f'cuda:{arguments.gpu_index}')
     if not 0 <= arguments.loss_weight <= 1:
         raise ValueError(
             f"The loss weight must be in [0, 1], but get{arguments.loss_weight}")
@@ -73,6 +83,8 @@ def parse_args():
 
 
 def main():
+    callbacks = ModelCheckpoint(
+        save_top_k=2, monitor="f1", filename='{epoch}-{f1:.3f}-{pre:.3f}', mode="max")
     args = parse_args()
 
     train_data = NerDataset(args.train_file, args)
@@ -87,23 +99,23 @@ def main():
     args.pylen, args.sklen = train_data.pylen, train_data.sklen
 
     trainer = pl.Trainer(max_epochs=args.epochs,
-                         gpus=None if args.hard_device == 'cpu' else [
-                             args.gpu_index],
+                         gpus=[0],
                          accumulate_grad_batches=args.accumulate_grad_batches,
-                         #  resume_from_checkpoint=""
+                         #  resume_from_checkpoint="",
+                         callbacks=[callbacks]
                          )
     model = JDNerTrainingModel(args)
     # model.load_from_transformers_state_dict(get_abs_path('checkpoint', 'pytorch_model.bin'))
-    # model.load_from_transformers_state_dict(os.path.join(args.bert_checkpoint, 'pytorch_model.bin'))
-    model.load_from_transformers_state_dict("data/new_init.pt")
+    model.load_from_transformers_state_dict(
+        os.path.join(args.bert_checkpoint, 'pytorch_model.bin'))
     if args.load_checkpoint:
         model.load_state_dict(torch.load(get_abs_path('checkpoint', f'{model.__class__.__name__}_model.bin'),
-                                         map_location=args.hard_device))
+                                         map_location="cpu"))
     if args.mode == 'train':
         trainer.fit(model, train_loader, valid_loader)
 
-    model.load_state_dict(
-        torch.load(get_abs_path('checkpoint', f'{model.__class__.__name__}_model.bin'), map_location=args.hard_device))
+    # model.load_state_dict(
+    #     torch.load(get_abs_path('checkpoint', f'{model.__class__.__name__}_model.bin'), map_location="cpu"))
     # trainer.test(model, test_loader)
 
 

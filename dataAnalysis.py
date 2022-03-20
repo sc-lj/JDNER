@@ -7,8 +7,10 @@
 @License :   (C)Copyright 2021-2022, Liugroup-NLPR-CASIA
 @Desc    :   None
 '''
+from LAC.lac import LAC
 import json
 from collections import defaultdict
+from pyparsing import line
 from pypinyin import pinyin, Style, lazy_pinyin
 from simhash import Simhash, SimhashIndex
 import re
@@ -109,11 +111,12 @@ def read_sample_file():
         for line in train_text:
             f.write(line+"\n")
 
-    with open("data/train.txt", 'w') as f:
+    with open("data/val.txt", 'w') as f:
         for line in val_text:
             f.write(line+"\n")
 
     with open("data/entites.json", 'w') as f:
+        entities = {k: list(set(v)) for k, v in entities.items()}
         json.dump(entities, f, ensure_ascii=False)
 
     labels = entities.keys()
@@ -220,8 +223,8 @@ def pretrain_data():
     """为预训练模型准备数据集
     """
     wiki_data = preprocess_wiki_data()
-    news2016 = preprocess_news2016()
-    all_data = wiki_data+news2016
+    # news2016 = preprocess_news2016()
+    all_data = wiki_data
     shuffle(all_data)
     # no_duplicates = [all_data[0]]
     # indexs = 0
@@ -251,6 +254,29 @@ def pretrain_data():
     print("所有数据:", number)
     print("验证数据:", val_number)
     # print("去重后数据:", len(no_duplicates))
+
+
+def baidu_lac():
+    """n	普通名词	f	方位名词	s	处所名词	nw	作品名
+        nz	其他专名	v	普通动词	vd	动副词	vn	名动词
+        a	形容词	ad	副形词	an	名形词	d	副词
+        m	数量词	q	量词	r	代词	p	介词
+        c	连词	u	助词	xc	其他虚词	w	标点符号
+        PER	人名	LOC	地名	ORG	机构名	TIME	时间
+
+    Args:
+        text (_type_): _description_
+    """
+    lac = LAC()
+    with open("data/pretrain_train_data.txt", 'r') as f:
+        lines = f.readlines()
+
+    number = len(lines)
+    batch_size = 20
+    for i in range(0, number, batch_size):
+        batch_text = lines[i:i+batch_size]
+        batch_text = [t.strip() for t in batch_text]
+        lac.run(batch_text)
 
 
 if __name__ == "__main__":
