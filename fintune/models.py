@@ -38,14 +38,14 @@ class EmbeddingNetwork(nn.Module):
         )
         self.MAX_SEN_LEN = max_sen_len
 
-    def forward(self, sen_pyids):
+    def forward(self, sen_pyids, max_sen_len):
         sen_pyids = sen_pyids.reshape(-1, self.seq_len)
         sen_emb = self.pyemb(sen_pyids)
         sen_emb = sen_emb.reshape(-1, self.seq_len, self.PYDIM)
         all_out, final_out = self.GRU(sen_emb)
         final_out = final_out.mean(0, keepdim=True)
         lstm_output = final_out.reshape(
-            shape=[-1, self.MAX_SEN_LEN, self.config.hidden_size])
+            shape=[-1, max_sen_len, self.config.hidden_size])
 
         return lstm_output
 
@@ -113,7 +113,8 @@ class BertModel(bertModel):
         position_ids=None,
         head_mask=None,
         py2ids=None,
-        sk2ids=None
+        sk2ids=None,
+        max_sen_len=None
     ):
         input_shape = input_ids.size()
         batch_size, seq_length = input_shape
@@ -139,10 +140,10 @@ class BertModel(bertModel):
             head_mask, self.config.num_hidden_layers)
         pinyin_emb = None
         if py2ids is not None:
-            py_emb = self.py_emb(py2ids)
+            py_emb = self.py_emb(py2ids, max_sen_len)
             pinyin_emb = py_emb
         if sk2ids is not None:
-            sk_emb = self.sk_emb(sk2ids)
+            sk_emb = self.sk_emb(sk2ids, max_sen_len)
             if pinyin_emb is not None:
                 pinyin_emb += sk_emb
         embedding_output = self.embeddings(
@@ -181,9 +182,9 @@ class JDNerModel(nn.Module):
         self.cls = nn.Linear(linear_hidden, num_labels)
         self.crf = CRF(num_labels, batch_first=True)
 
-    def forward(self, input_ids, input_mask, pinyin_ids=None, stroke_ids=None, lmask=None, labelids=None):
+    def forward(self, input_ids, input_mask, pinyin_ids=None, stroke_ids=None, lmask=None, labelids=None, max_sen_len=512):
         sequence_output = self.bert(
-            input_ids=input_ids, attention_mask=input_mask, py2ids=pinyin_ids, sk2ids=stroke_ids)
+            input_ids=input_ids, attention_mask=input_mask, py2ids=pinyin_ids, sk2ids=stroke_ids, max_sen_len=max_sen_len)
         if self.add_lstm:
             sequence_output, _ = self.lstm(sequence_output)
             sequence_output = sequence_output*input_mask.unsqueeze(-1)
@@ -192,9 +193,9 @@ class JDNerModel(nn.Module):
         loss = -self.crf(cls_output, labelids, mask=lmask)
         return loss
 
-    def decode(self, input_ids, input_mask, pinyin_ids=None, stroke_ids=None, lmask=None, labelids=None):
+    def decode(self, input_ids, input_mask, pinyin_ids=None, stroke_ids=None, lmask=None, labelids=None, max_sen_len=None):
         sequence_output = self.bert(
-            input_ids=input_ids, attention_mask=input_mask, py2ids=pinyin_ids, sk2ids=stroke_ids)
+            input_ids=input_ids, attention_mask=input_mask, py2ids=pinyin_ids, sk2ids=stroke_ids, max_sen_len=max_sen_len)
         if self.add_lstm:
             sequence_output, _ = self.lstm(sequence_output)
         cls_output = self.cls(sequence_output)
@@ -246,22 +247,22 @@ class JDNerTrainingModel(pl.LightningModule):
             self.adv_model = PGD(self.model)
             self.automatic_optimization = False
 
-    def forward(self, input_ids, input_mask, pinyin_ids=None, stroke_ids=None, lmask=None, labelids=None):
+    def forward(self, input_ids, input_mask, pinyin_ids=None, stroke_ids=None, lmask=None, labelids=None, max_sen_len=512):
         loss = self.model(input_ids, input_mask, pinyin_ids,
-                          stroke_ids, lmask, labelids)
+                          stroke_ids, lmask, labelids, max_sen_len)
         return loss
 
-    def adv_fgm_model(self, fgm_model, input_ids, input_mask, pinyin_ids=None, stroke_ids=None, lmask=None, labelids=None):
+    def adv_fgm_model(self, fgm_model, input_ids, input_mask, pinyin_ids=None, stroke_ids=None, lmask=None, labelids=None, max_sen_len=512):
         # 对抗训练
         fgm_model.attack(epsilon=self.args.epsilon)  # 在embedding上添加对抗扰动
         # crf 训练
         loss_adv = self.model(input_ids, input_mask, pinyin_ids,
-                              stroke_ids, lmask, labelids)
+                              stroke_ids, lmask, labelids, max_sen_len)
         self.manual_backward(loss_adv)
         fgm_model.restore()
         return loss_adv.item()
 
-    def adv_pgd_model(self, pgd_model, input_ids, input_mask, pinyin_ids=None, stroke_ids=None, lmask=None, labelids=None):
+    def adv_pgd_model(self, pgd_model, input_ids, input_mask, pinyin_ids=None, stroke_ids=None, lmask=None, labelids=None, max_sen_len=512):
         pgd_model.backup_grad()
         K = self.args.pgd_K
         # 对抗训练
@@ -277,7 +278,7 @@ class JDNerTrainingModel(pl.LightningModule):
 
             # crf 训练
             loss_adv = self.model(input_ids, input_mask, pinyin_ids,
-                                  stroke_ids, lmask, labelids)
+                                  stroke_ids, lmask, labelids, max_sen_len)
             self.manual_backward(loss_adv)  # 反向传播，并在正常的grad基础上，累加对抗训练的梯度
             loss_advs.append(loss_adv.item())
         pgd_model.restore()  #
@@ -286,7 +287,8 @@ class JDNerTrainingModel(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         input_ids, input_mask, pinyin_ids = batch['input_ids'], batch['input_mask'], batch['pinyin_ids']
         stroke_ids, lmask, labelids = batch['stroke_ids'], batch['lmask'], batch['labels']
-
+        length = batch['length']
+        max_sen_len = max(length)
         if not self.automatic_optimization:
             opt = self.optimizers()
             scheduler = self.lr_schedulers()
@@ -295,17 +297,17 @@ class JDNerTrainingModel(pl.LightningModule):
         # loss = self.model(input_ids, input_mask,
         #                     pinyin_ids, stroke_ids, lmask, labelids)
         loss = self.model(input_ids, input_mask,
-                          lmask=lmask, labelids=labelids)
+                          lmask=lmask, labelids=labelids, max_sen_len=max_sen_len)
         if not self.automatic_optimization:
             self.manual_backward(loss)
             opt.step()
             scheduler.step()
         if self.adv == "fgm":
             self.adv_loss = self.adv_fgm_model(self.adv_model, input_ids, input_mask,
-                                               lmask=lmask, labelids=labelids)
+                                               lmask=lmask, labelids=labelids, max_sen_len=max_sen_len)
         elif self.adv == 'pgd':
             self.adv_loss = self.adv_pgd_model(self.adv_model, input_ids, input_mask,
-                                               lmask=lmask, labelids=labelids)
+                                               lmask=lmask, labelids=labelids, max_sen_len=max_sen_len)
         return loss
 
     def training_step_end(self, loss):
@@ -316,9 +318,10 @@ class JDNerTrainingModel(pl.LightningModule):
         input_ids, input_mask, pinyin_ids = batch['input_ids'], batch['input_mask'], batch['pinyin_ids']
         stroke_ids, lmask, labelids = batch['stroke_ids'], batch['lmask'], batch['labels']
         length = batch['length']
+        max_sen_len = max(length)
         # sequence_output = self.model.decode(input_ids=input_ids, attention_mask=input_mask, py2ids=pinyin_ids, sk2ids=stroke_ids)
         predict_tag, val_loss = self.model.decode(input_ids, input_mask,
-                                                  lmask=lmask, labelids=labelids)
+                                                  lmask=lmask, labelids=labelids, max_sen_len=max_sen_len)
         val_loss = val_loss.cpu().detach().numpy()
         labelids = labelids.cpu().detach().numpy()
         return (labelids, predict_tag, val_loss, length)

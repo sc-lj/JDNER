@@ -105,16 +105,17 @@ class NerDataset(Dataset):
         # The mask has 1 for real tokens and 0 for padding tokens. Only real tokens are attended to.
         input_mask = [1] * length
         # Zero-pad up to the sequence length.
-        while len(input_ids) < self.max_sen_len:
-            input_ids.append(0)
-            input_mask.append(0)
-            pinyin_ids.append(np.zeros(self.pylen))
-            stroke_ids.append(np.zeros(self.sklen))
-            _labels.append(self.label2ids["O"])
-            _lmask.append(0)
+        # while len(input_ids) < self.max_sen_len:
+        #     input_ids.append(0)
+        #     input_mask.append(0)
+        #     pinyin_ids.append(np.zeros(self.pylen))
+        #     stroke_ids.append(np.zeros(self.sklen))
+        #     _labels.append(self.label2ids["O"])
+        #     _lmask.append(0)
         pinyin_ids = np.vstack(pinyin_ids)
         stroke_ids = np.vstack(stroke_ids)
-        return {"input_ids": input_ids, "length": length, "input_mask": input_mask, "pinyin_ids": pinyin_ids, "stroke_ids": stroke_ids, "labels": _labels, "lmask": _lmask}
+        return {"input_ids": input_ids, "length": length, "input_mask": input_mask, "pinyin_ids": pinyin_ids, "stroke_ids": stroke_ids,
+                "labels": _labels, "lmask": _lmask, "pylen": self.pylen, "sklen": self.sklen, "labelOid": self.label2ids["O"]}
 
     def get_zi_py_matrix(self):
         pysize = 430
@@ -196,6 +197,7 @@ class NerDataset(Dataset):
 
 
 def collate_fn(batches):
+    max_length = max([batch['length'] for batch in batches])
     input_ids = []
     input_masks = []
     pinyin_ids = []
@@ -204,12 +206,22 @@ def collate_fn(batches):
     lmasks = []
     lengthes = []
     for batch in batches:
-        input_ids.append(batch['input_ids'])
-        input_masks.append(batch['input_mask'])
-        pinyin_ids.append(batch['pinyin_ids'])
-        stroke_ids.append(batch['stroke_ids'])
-        labels.append(batch['labels'])
-        lmasks.append(batch['lmask'])
+        length = batch['length']
+        pylen = batch["pylen"]
+        sklen = batch['sklen']
+        labelOid = batch["labelOid"]
+        input_ids.append(batch['input_ids']+[0]*(max_length-length))
+        input_masks.append(batch['input_mask']+[0]*(max_length-length))
+        pinyin_id = batch['pinyin_ids'] + \
+            [np.zeros((max_length-length), pylen)]
+        pinyin_id = np.vstack(pinyin_id)
+        pinyin_ids.append(pinyin_id)
+        stroke_id = batch['stroke_ids'] + \
+            [np.zeros((max_length-length), sklen)]
+        stroke_id = np.vstack(stroke_id)
+        stroke_ids.append(stroke_id)
+        labels.append(batch['labels']+[labelOid]*(max_length-length))
+        lmasks.append(batch['lmask']+[0]*(max_length-length))
         lengthes.append(batch['length'])
 
     input_ids = torch.tensor(input_ids, dtype=torch.long)
