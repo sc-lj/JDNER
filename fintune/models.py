@@ -438,23 +438,23 @@ class JDNerTrainingModel(pl.LightningModule):
 
     def configure_optimizers(self):
         param_optimizer = list(self.named_parameters())
-        no_decay = ['bias', 'LayerNorm.bias', "LayerNorm.weight"]
-        # optimizer_grouped_parameters = [
-        #     {"params": [p for n, p in param_optimizer if not any(
-        #         nd in n for nd in no_decay) and "bert" in n], "weight_decay":0.8, "lr":self.args.lr},
-        #     {"params": [p for n, p in param_optimizer if any(
-        #         nd in n for nd in no_decay) and "bert" in n], "weight_decay":0.0, "lr":2e-5},
-        #     {"params": [p for n, p in param_optimizer if not any(
-        #         [nd in n for nd in no_decay]) and 'bert' not in n], "weight_decay":0.8, 'lr':2e-4},
-        #     {"params": [p for n, p in param_optimizer if any(
-        #         [nd in n for nd in no_decay]) and 'bert'not in n], 'weigth_decay':0.0, 'lr':2e-4}
-        # ]
+        no_decay = ['bias', "LayerNorm.weight"]
         optimizer_grouped_parameters = [
-            {"params": [p for n, p in param_optimizer if "bert" in n],
-                "weight_decay":0.8, "lr":self.args.lr},
-            {"params": [p for n, p in param_optimizer if "bert" not in n],
-                "weight_decay":0.0, "lr":self.args.no_bert_lr},
+            {"params": [p for n, p in param_optimizer if not any(
+                nd in n for nd in no_decay) and "bert" in n], "weight_decay":0.8, "lr":self.args.lr},
+            {"params": [p for n, p in param_optimizer if any(
+                nd in n for nd in no_decay) and "bert" in n], "weight_decay":0.0, "lr":self.args.lr},
+            {"params": [p for n, p in param_optimizer if not any(
+                [nd in n for nd in no_decay]) and 'bert' not in n], "weight_decay":0.8, 'lr':self.args.no_bert_lr},
+            {"params": [p for n, p in param_optimizer if any(
+                [nd in n for nd in no_decay]) and 'bert'not in n], 'weigth_decay':0.0, 'lr':self.args.no_bert_lr}
         ]
+        # optimizer_grouped_parameters = [
+        #     {"params": [p for n, p in param_optimizer if "bert" in n],
+        #         "weight_decay":0.8, "lr":self.args.lr},
+        #     {"params": [p for n, p in param_optimizer if "bert" not in n],
+        #         "weight_decay":0.0, "lr":self.args.no_bert_lr},
+        # ]
         # optimizer_grouped_parameters = self.parameters()
         optimizer = torch.optim.AdamW(
             optimizer_grouped_parameters, lr=self.args.lr)
