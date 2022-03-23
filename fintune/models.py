@@ -13,7 +13,7 @@ import numpy as np
 import pytorch_lightning as pl
 from torch.optim.lr_scheduler import LambdaLR
 from transformers import BertConfig
-from transformers.models.bert.modeling_bert import BertEncoder, BertPooler, BertOnlyMLMHead, BertEmbeddings as bertEmbeddings
+from transformers.models.bert.modeling_bert import BertEncoder, BertModel as bertModel, BertPooler, BertOnlyMLMHead, BertEmbeddings as bertEmbeddings
 from transformers.modeling_outputs import BaseModelOutputWithPoolingAndCrossAttentions
 from transformers.modeling_utils import ModuleUtilsMixin
 from torchcrf import CRF
@@ -93,9 +93,9 @@ class BertEmbeddings(bertEmbeddings):
         return embeddings
 
 
-class BertModel(torch.nn.Module, ModuleUtilsMixin):
+class BertModel(bertModel):
     def __init__(self, config, args):
-        super().__init__()
+        super().__init__(config)
         PYLEN, SKLEN = args.pylen, args.sklen
         self.config = config
         self.py_emb = EmbeddingNetwork(
@@ -166,6 +166,8 @@ class JDNerModel(nn.Module):
         self.args = args
         self.config = BertConfig.from_pretrained(self.args.bert_checkpoint)
         self.bert = BertModel(self.config, args)
+        # self.bert = BertModel.from_pretrained(
+        # self.args.bert_checkpoint, args=args)
         num_labels = self.args.number_tag
         self.add_lstm = self.args.lstm
         if self.add_lstm:
@@ -184,6 +186,7 @@ class JDNerModel(nn.Module):
             input_ids=input_ids, attention_mask=input_mask, py2ids=pinyin_ids, sk2ids=stroke_ids)
         if self.add_lstm:
             sequence_output, _ = self.lstm(sequence_output)
+            sequence_output = sequence_output*input_mask.unsqueeze(-1)
         cls_output = self.cls(sequence_output)
         # crf 训练
         loss = -self.crf(cls_output, labelids, mask=lmask)
@@ -250,7 +253,7 @@ class JDNerTrainingModel(pl.LightningModule):
 
     def adv_fgm_model(self, fgm_model, input_ids, input_mask, pinyin_ids=None, stroke_ids=None, lmask=None, labelids=None):
         # 对抗训练
-        fgm_model.attack()  # 在embedding上添加对抗扰动
+        fgm_model.attack(epsilon=self.args.epsilon)  # 在embedding上添加对抗扰动
         # crf 训练
         loss_adv = self.model(input_ids, input_mask, pinyin_ids,
                               stroke_ids, lmask, labelids)
@@ -265,7 +268,8 @@ class JDNerTrainingModel(pl.LightningModule):
         loss_advs = []
         for t in range(K):
             # 在embedding上添加对抗扰动, first attack时备份param.data
-            pgd_model.attack(is_first_attack=(t == 0))
+            pgd_model.attack(epsilon=self.args.epsilon,
+                             is_first_attack=(t == 0))
             if t != K - 1:
                 self.model.zero_grad()
             else:
@@ -304,6 +308,10 @@ class JDNerTrainingModel(pl.LightningModule):
                                                lmask=lmask, labelids=labelids)
         return loss
 
+    def training_step_end(self, loss):
+        self.log("loss", loss, on_step=True, prog_bar=True)
+        return loss
+
     def validation_step(self, batch, batch_idx):
         input_ids, input_mask, pinyin_ids = batch['input_ids'], batch['input_mask'], batch['pinyin_ids']
         stroke_ids, lmask, labelids = batch['stroke_ids'], batch['lmask'], batch['labels']
@@ -335,8 +343,8 @@ class JDNerTrainingModel(pl.LightningModule):
         precision, recall, f1 = self.entity_metric(
             target_labels, predict_labels, target_length)
         self.log("char_acc", char_acc, prog_bar=True)
-        self.log("pre", precision)
-        self.log("recall", recall)
+        self.log("pre", precision, prog_bar=True)
+        self.log("recall", recall, prog_bar=True)
         self.log("f1", f1, prog_bar=True)
 
     def word_metric(self, target, predict, length):
@@ -429,7 +437,27 @@ class JDNerTrainingModel(pl.LightningModule):
         self.validation_epoch_end(outputs)
 
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(self.parameters(), lr=self.args.lr)
+        param_optimizer = list(self.named_parameters())
+        no_decay = ['bias', 'LayerNorm.bias', "LayerNorm.weight"]
+        # optimizer_grouped_parameters = [
+        #     {"params": [p for n, p in param_optimizer if not any(
+        #         nd in n for nd in no_decay) and "bert" in n], "weight_decay":0.8, "lr":self.args.lr},
+        #     {"params": [p for n, p in param_optimizer if any(
+        #         nd in n for nd in no_decay) and "bert" in n], "weight_decay":0.0, "lr":2e-5},
+        #     {"params": [p for n, p in param_optimizer if not any(
+        #         [nd in n for nd in no_decay]) and 'bert' not in n], "weight_decay":0.8, 'lr':2e-4},
+        #     {"params": [p for n, p in param_optimizer if any(
+        #         [nd in n for nd in no_decay]) and 'bert'not in n], 'weigth_decay':0.0, 'lr':2e-4}
+        # ]
+        optimizer_grouped_parameters = [
+            {"params": [p for n, p in param_optimizer if "bert" in n],
+                "weight_decay":0.8, "lr":self.args.lr},
+            {"params": [p for n, p in param_optimizer if "bert" not in n],
+                "weight_decay":0.0, "lr":self.args.no_bert_lr},
+        ]
+        # optimizer_grouped_parameters = self.parameters()
+        optimizer = torch.optim.AdamW(
+            optimizer_grouped_parameters, lr=self.args.lr)
         scheduler = LambdaLR(optimizer,
                              lr_lambda=lambda step: min((step + 1) ** -0.5,
                                                         (step + 1) * self.args.warmup_epochs ** (-1.5)),

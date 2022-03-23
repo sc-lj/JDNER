@@ -7,20 +7,20 @@
 @License :   (C)Copyright 2021-2022, Liugroup-NLPR-CASIA
 @Desc    :   None
 '''
-from LAC.lac import LAC
+
 import json
 from collections import defaultdict
-from pyparsing import line
 from pypinyin import pinyin, Style, lazy_pinyin
 from simhash import Simhash, SimhashIndex
 import re
 import os
 from random import shuffle
 from tqdm import tqdm
+# from LAC import LAC
 
 
 def read_sample_file():
-    with open("data/train_500.txt", 'r') as f:
+    with open("data/2022京东电商数据比赛/京东商品标题实体识别数据集/train_data/train.txt", 'r') as f:
         lines = f.readlines()
 
     entities = defaultdict(list)
@@ -273,13 +273,25 @@ def baidu_lac():
 
     number = len(lines)
     batch_size = 20
-    for i in range(0, number, batch_size):
+    all_text = []
+    for i in tqdm(range(0, number, batch_size)):
         batch_text = lines[i:i+batch_size]
         batch_text = [t.strip() for t in batch_text]
-        lac.run(batch_text)
+        result = lac.run(batch_text)
+        for text, label in result:
+            text_label = []
+            for w, l in zip(*(text, label)):
+                text_label.append("\t".join((w, l)))
+            all_text.append(text_label)
+    with open("data/pretrain_train_data_label.txt", 'w') as f:
+        for line in all_text:
+            for l in line:
+                f.write(l+"\n")
+            f.write("\n")
 
 
 if __name__ == "__main__":
-    # read_sample_file()
+    read_sample_file()
     # get_pinyin_vocab()
-    pretrain_data()
+    # pretrain_data()
+    # baidu_lac()

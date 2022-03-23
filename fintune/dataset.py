@@ -5,6 +5,7 @@
 @Email  :   abtion{at}outlook.com
 """
 from ast import arg
+from secrets import choice
 import torch
 import json
 import numpy as np
@@ -12,10 +13,12 @@ from torch.utils.data import Dataset, DataLoader
 from utils import load_json
 from pinyin_tool import PinyinTool
 from transformers.models.bert.tokenization_bert import BertTokenizer
+import random
+import synonyms
 
 
 class NerDataset(Dataset):
-    def __init__(self, fp, args):
+    def __init__(self, fp, args, is_train=True):
         super().__init__()
         self.data = load_json(fp)
         self.space_char = "[unused1]"
@@ -27,6 +30,12 @@ class NerDataset(Dataset):
         label2id_path = args.label_file
         with open(label2id_path, 'r') as f:
             self.label2ids = json.load(f)
+
+        entity_path = args.entity_path
+        with open(entity_path, 'r') as f:
+            self.entities = json.load(f)
+
+        self.is_train = is_train
 
         self.number_tag = len(self.label2ids)
         self.tokenizer = BertTokenizer.from_pretrained(args.bert_checkpoint)
@@ -63,6 +72,8 @@ class NerDataset(Dataset):
         if len(tokens) > self.max_sen_len - 2:
             tokens = tokens[0:(self.max_sen_len - 2)]
             labels = labels[0:(self.max_sen_len - 2)]
+        if self.is_train and random.random() < 0.5:
+            tokens, labels = self.EDA(tokens, labels)
 
         _tokens = []
         _labels = []
@@ -87,6 +98,7 @@ class NerDataset(Dataset):
         _lmask.append(1)
         pinyin_ids.append(np.zeros(self.pylen))
         stroke_ids.append(np.zeros(self.sklen))
+
         input_ids = self.tokenizer.convert_tokens_to_ids(_tokens)
 
         length = len(input_ids)
@@ -115,6 +127,72 @@ class NerDataset(Dataset):
             pyid = self.pytool.get_pinyin_id(key)
             matrix[tokenid][pyid] = 1.
         return np.asarray(matrix, dtype=np.float32)
+
+    def EDA(self, tokens, labels):
+        """实体识别的数据增强技术
+
+        Args:
+            tokens (_type_): _description_
+            labels (_type_): _description_
+        """
+        entities = []
+        tmp_ent = ""
+        start = 0
+        for index, tag in enumerate(labels):
+            if tag.startswith("B"):
+                if tmp_ent:
+                    entities.append((tmp_ent, tokens[start:index]))
+                start = index
+                tmp_ent = tag[2:]
+            elif tag.startswith("O"):
+                if tmp_ent and tmp_ent != "O":
+                    entities.append((tmp_ent, tokens[start:index]))
+                    start = index
+                tmp_ent = "O"
+        if tmp_ent:
+            entities.append((tmp_ent, tokens[start:index]))
+            tmp_ent = ""
+        new_tokens = []
+        new_labels = []
+        number = len(entities)
+        is_choiced = False
+        for i in range(number):
+            line = entities[i]
+            lab, token = line
+            if lab == "O":
+                new_tokens.extend(token)
+                new_labels.extend(["O"]*len(token))
+                continue
+            elif not is_choiced:
+                prob = random.random()
+                if prob < 0.3:
+                    # lab_entites = self.entities[lab]
+                    # choice_ent = random.choice(lab_entites)
+                    # 采用同义词查找
+                    choice_ent = synonyms.nearby("".join(token))
+                    choice_ent = [word for word, pro in zip(
+                        *choice_ent) if 1 > pro > 0.66]
+                    if len(choice_ent) != 0:
+                        choice_ent = random.choice(choice_ent)
+                        is_choiced = True
+                        choice_ent_list = list(choice_ent)
+                        choice_ent_list = [
+                            l if len(l.strip()) else self.space_char for l in choice_ent_list]
+                    else:
+                        choice_ent_list = token
+
+                    new_tokens.extend(choice_ent_list)
+                    new_labels.extend(
+                        ["B-"+lab if i == 0 else "I-"+lab for i in range(len(choice_ent_list))])
+                else:
+                    new_tokens.extend(token)
+                    new_labels.extend(
+                        ["B-"+lab if i == 0 else "I-"+lab for i in range(len(token))])
+            else:
+                new_tokens.extend(token)
+                new_labels.extend(
+                    ["B-"+lab if i == 0 else "I-"+lab for i in range(len(token))])
+        return new_tokens, new_labels
 
 
 def collate_fn(batches):
