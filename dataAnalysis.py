@@ -134,6 +134,10 @@ def read_sample_file():
     with open("data/label2ids.json", 'w') as f:
         json.dump(label2ids, f, ensure_ascii=False)
 
+    entity2ids = {k: i for i, k in enumerate(labels)}
+    with open("data/entity2ids.json", 'w') as f:
+        json.dump(entity2ids, f, ensure_ascii=False)
+
     return samples, texts, entities, text_entity_pair
 
 

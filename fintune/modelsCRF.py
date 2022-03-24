@@ -20,6 +20,44 @@ from torchcrf import CRF
 from AdTraings import PGD, FGM
 
 
+class SinusoidalPositionEmbedding(nn.Module):
+    """定义Sin-Cos位置Embedding
+    """
+
+    def __init__(self, output_dim, merge_mode='mul', **kwargs):
+        super(SinusoidalPositionEmbedding, self).__init__()
+        self.output_dim = output_dim
+        self.merge_mode = merge_mode
+
+    def forward(self, inputs):
+        input_shape = inputs.shape
+        batch_size, seq_len = input_shape[0], input_shape[1]
+        position_ids = torch.arange(
+            0, seq_len, dtype=torch.float, device=inputs.device).reshape(1, -1)
+
+        indices = torch.arange(0, self.output_dim // 2,
+                               dtype=torch.float, device=inputs.device)
+        indices = torch.pow(10000.0, -2 * indices / self.output_dim)
+        # [1,seq_len,output_dim//2]
+        embeddings = torch.matmul(
+            position_ids.unsqueeze(-1), indices.unsqueeze(0))
+        # [1,seq_len,output_dim//2,2]
+        embeddings = torch.stack(
+            [torch.sin(embeddings), torch.cos(embeddings)], dim=-1)
+        # [1,seq_len,output_dim]
+        embeddings = torch.reshape(embeddings, (-1, seq_len, self.output_dim))
+
+        if self.merge_mode == 'add':
+            return inputs + embeddings
+        elif self.merge_mode == 'mul':
+            return inputs * (embeddings + 1.0)
+        elif self.merge_mode == 'zero':
+            return embeddings
+        else:
+            embeddings = embeddings.repeat([batch_size, 1, 1])
+            return torch.cat([inputs, embeddings], dim=-1)
+
+
 class EmbeddingNetwork(nn.Module):
     def __init__(self, config, PYLEN, num_embeddings, max_sen_len=512):
         super().__init__()
@@ -51,6 +89,11 @@ class EmbeddingNetwork(nn.Module):
 
 
 class BertEmbeddings(bertEmbeddings):
+    def __init__(self, config):
+        super().__init__(config)
+        self.position_embeddings = SinusoidalPositionEmbedding(
+            output_dim=config.hidden_size)
+
     def forward(
         self, input_ids=None, token_type_ids=None, position_ids=None, pinyin_embs=None, inputs_embeds=None, past_key_values_length=0
     ):
@@ -83,9 +126,10 @@ class BertEmbeddings(bertEmbeddings):
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
 
         embeddings = inputs_embeds + token_type_embeddings
-        if self.position_embedding_type == "absolute":
-            position_embeddings = self.position_embeddings(position_ids)
-            embeddings += position_embeddings
+        # if self.position_embedding_type == "absolute":
+        #     position_embeddings = self.position_embeddings(position_ids)
+        #     embeddings += position_embeddings
+        embeddings = self.position_embeddings(embeddings)
         if pinyin_embs is not None:
             embeddings += pinyin_embs
         embeddings = self.LayerNorm(embeddings)
@@ -226,7 +270,7 @@ class JDNerModel(nn.Module):
         self.load_state_dict(state_dict, strict=False)
 
 
-class JDNerTrainingModel(pl.LightningModule):
+class CRFNerTrainingModel(pl.LightningModule):
     def __init__(self, arguments):
         super().__init__()
         self.args = arguments
@@ -345,10 +389,10 @@ class JDNerTrainingModel(pl.LightningModule):
 
         precision, recall, f1 = self.entity_metric(
             target_labels, predict_labels, target_length)
-        self.log("char_acc", char_acc, prog_bar=True)
-        self.log("pre", precision, prog_bar=True)
-        self.log("recall", recall, prog_bar=True)
-        self.log("f1", f1, prog_bar=True)
+        self.log("char_acc", float(char_acc), prog_bar=True)
+        self.log("pre", float(precision), prog_bar=True)
+        self.log("recall", float(recall), prog_bar=True)
+        self.log("f1", float(f1), prog_bar=True)
 
     def word_metric(self, target, predict, length):
         """字符级指标计算
