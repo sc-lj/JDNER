@@ -147,13 +147,13 @@ class NerDataset(Dataset):
         # tokens are attended to.
         input_mask = [1] * length
         # Zero-pad up to the sequence length.
-        while len(input_ids) < self.max_sen_len:
-            input_ids.append(0)
-            input_mask.append(0)
-            pinyin_ids.append(1)  # [UNK]
-            # stroke_ids.append(np.zeros(self.sklen))
-            # _labels.append(self.label2ids["O"])
-            _lmask.append(0)
+        # while len(input_ids) < self.max_sen_len:
+        #     input_ids.append(0)
+        #     input_mask.append(0)
+        #     pinyin_ids.append(1)  # [UNK]
+        #     # stroke_ids.append(np.zeros(self.sklen))
+        #     # _labels.append(self.label2ids["O"])
+        #     _lmask.append(0)
         # pinyin_ids = np.vstack(pinyin_ids)
         # stroke_ids = np.vstack(stroke_ids)
         masked_ids, masked_flgs, masked_py_ids, masked_sk_ids = self.masker.mask_process(
@@ -164,10 +164,11 @@ class NerDataset(Dataset):
                                  for skid in masked_sk_ids])
         lmask = masked_flgs*np.array(_lmask)
         label_ids = input_ids
-        input_ids = masked_ids
+        input_ids = masked_ids.tolist()
         masked_pinyin_ids = masked_py_ids
         return {"input_ids": input_ids, "length": length, "input_mask": input_mask, "pinyin_ids": pinyin_ids,
-                "masked_pinyin_ids": masked_pinyin_ids, "masked_sk_ids": masked_sk_ids, "labels": label_ids, "lmask": lmask}
+                "masked_pinyin_ids": masked_pinyin_ids, "masked_sk_ids": masked_sk_ids, "labels": label_ids, 
+                "lmask": lmask.tolist(),"sklen":self.sklen,"pylen":self.pylen,"labelOid":self.label2ids["O"]}
 
     def get_zi_py_matrix(self):
         pysize = 430
@@ -183,6 +184,7 @@ class NerDataset(Dataset):
 
 
 def collate_fn(batches):
+    max_length = max([batch['length'] for batch in batches])
     input_ids = []
     input_masks = []
     pinyin_ids = []
@@ -192,13 +194,19 @@ def collate_fn(batches):
     lmasks = []
     lengthes = []
     for batch in batches:
-        input_ids.append(batch['input_ids'])
-        input_masks.append(batch['input_mask'])
-        pinyin_ids.append(batch['pinyin_ids'])
-        masked_pinyin_ids.append(batch['masked_pinyin_ids'])
-        masked_sk_ids.append(batch['masked_sk_ids'])
-        labels.append(batch['labels'])
-        lmasks.append(batch['lmask'])
+        length = batch['length']
+        sklen = batch['sklen']
+        pylen = batch['pylen']
+        labelOid = batch['labelOid']
+        input_ids.append(batch['input_ids']+[0]*(max_length-length))
+        input_masks.append(batch['input_mask']+[0]*(max_length-length))
+        pinyin_ids.append(batch['pinyin_ids']+[0]*(max_length-length))
+        masked_pinyin_id = [batch['masked_pinyin_ids']]+[np.zeros((max_length-length,pylen))]
+        masked_pinyin_ids.append(np.vstack(masked_pinyin_id))
+        masked_sk_id = [batch['masked_sk_ids']]+[np.zeros((max_length-length,sklen))]
+        masked_sk_ids.append(np.vstack(masked_sk_id))
+        labels.append(batch['labels']+[labelOid]*(max_length-length))
+        lmasks.append(batch['lmask']+[0]*(max_length-length))
         lengthes.append(batch['length'])
 
     input_ids = torch.tensor(np.array(input_ids), dtype=torch.long)

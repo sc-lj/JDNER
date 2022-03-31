@@ -2,3 +2,6 @@ data
 .vscode
 lightning_logs
 __pycache__
+readme.txt
+setup.sh
+chinese_bert_base
