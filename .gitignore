@@ -5,3 +5,5 @@ __pycache__
 readme.txt
 setup.sh
 chinese_bert_base
+apex
+models

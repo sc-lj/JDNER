@@ -13,10 +13,49 @@ import numpy as np
 import pytorch_lightning as pl
 from torch.optim.lr_scheduler import LambdaLR
 from transformers import BertConfig
-from transformers.models.bert.modeling_bert import BertEncoder, BertPooler, BertOnlyMLMHead, BertEmbeddings as bertEmbeddings
+from transformers.models.bert.modeling_bert import BertEncoder, BertModel as bertModel, BertPooler, BertOnlyMLMHead, BertEmbeddings as bertEmbeddings
 from transformers.modeling_outputs import BaseModelOutputWithPoolingAndCrossAttentions
 from transformers.modeling_utils import ModuleUtilsMixin
 from torchcrf import CRF
+from AdTraings import PGD, FGM
+
+
+class SinusoidalPositionEmbedding(nn.Module):
+    """定义Sin-Cos位置Embedding
+    """
+
+    def __init__(self, output_dim, merge_mode='mul', **kwargs):
+        super(SinusoidalPositionEmbedding, self).__init__()
+        self.output_dim = output_dim
+        self.merge_mode = merge_mode
+
+    def forward(self, inputs):
+        input_shape = inputs.shape
+        batch_size, seq_len = input_shape[0], input_shape[1]
+        position_ids = torch.arange(
+            0, seq_len, dtype=torch.float, device=inputs.device).reshape(1, -1)
+
+        indices = torch.arange(0, self.output_dim // 2,
+                               dtype=torch.float, device=inputs.device)
+        indices = torch.pow(10000.0, -2 * indices / self.output_dim)
+        # [1,seq_len,output_dim//2]
+        embeddings = torch.matmul(
+            position_ids.unsqueeze(-1), indices.unsqueeze(0))
+        # [1,seq_len,output_dim//2,2]
+        embeddings = torch.stack(
+            [torch.sin(embeddings), torch.cos(embeddings)], dim=-1)
+        # [1,seq_len,output_dim]
+        embeddings = torch.reshape(embeddings, (-1, seq_len, self.output_dim))
+
+        if self.merge_mode == 'add':
+            return inputs + embeddings
+        elif self.merge_mode == 'mul':
+            return inputs * (embeddings + 1.0)
+        elif self.merge_mode == 'zero':
+            return embeddings
+        else:
+            embeddings = embeddings.repeat([batch_size, 1, 1])
+            return torch.cat([inputs, embeddings], dim=-1)
 
 
 class EmbeddingNetwork(nn.Module):
@@ -37,19 +76,24 @@ class EmbeddingNetwork(nn.Module):
         )
         self.MAX_SEN_LEN = max_sen_len
 
-    def forward(self, sen_pyids):
+    def forward(self, sen_pyids, max_sen_len):
         sen_pyids = sen_pyids.reshape(-1, self.seq_len)
         sen_emb = self.pyemb(sen_pyids)
         sen_emb = sen_emb.reshape(-1, self.seq_len, self.PYDIM)
         all_out, final_out = self.GRU(sen_emb)
         final_out = final_out.mean(0, keepdim=True)
         lstm_output = final_out.reshape(
-            shape=[-1, self.MAX_SEN_LEN, self.config.hidden_size])
+            shape=[-1, max_sen_len, self.config.hidden_size])
 
         return lstm_output
 
 
 class BertEmbeddings(bertEmbeddings):
+    def __init__(self, config):
+        super().__init__(config)
+        self.position_embeddings = SinusoidalPositionEmbedding(
+            output_dim=config.hidden_size)
+
     def forward(
         self, input_ids=None, token_type_ids=None, position_ids=None, pinyin_embs=None, inputs_embeds=None, past_key_values_length=0
     ):
@@ -82,9 +126,10 @@ class BertEmbeddings(bertEmbeddings):
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
 
         embeddings = inputs_embeds + token_type_embeddings
-        if self.position_embedding_type == "absolute":
-            position_embeddings = self.position_embeddings(position_ids)
-            embeddings += position_embeddings
+        # if self.position_embedding_type == "absolute":
+        #     position_embeddings = self.position_embeddings(position_ids)
+        #     embeddings += position_embeddings
+        embeddings = self.position_embeddings(embeddings)
         if pinyin_embs is not None:
             embeddings += pinyin_embs
         embeddings = self.LayerNorm(embeddings)
@@ -92,9 +137,9 @@ class BertEmbeddings(bertEmbeddings):
         return embeddings
 
 
-class BertModel(torch.nn.Module, ModuleUtilsMixin):
+class BertModel(bertModel):
     def __init__(self, config, args):
-        super().__init__()
+        super().__init__(config)
         PYLEN, SKLEN = args.pylen, args.sklen
         self.config = config
         self.py_emb = EmbeddingNetwork(
@@ -103,8 +148,6 @@ class BertModel(torch.nn.Module, ModuleUtilsMixin):
             self.config, PYLEN=SKLEN, num_embeddings=7)
         self.embeddings = BertEmbeddings(self.config)
         self.encoder = BertEncoder(self.config)
-        num_labels = args.number_tag
-        self.cls = nn.Linear(config.hidden_size, num_labels)
 
     def forward(
         self,
@@ -114,7 +157,8 @@ class BertModel(torch.nn.Module, ModuleUtilsMixin):
         position_ids=None,
         head_mask=None,
         py2ids=None,
-        sk2ids=None
+        sk2ids=None,
+        max_sen_len=None
     ):
         input_shape = input_ids.size()
         batch_size, seq_length = input_shape
@@ -140,10 +184,10 @@ class BertModel(torch.nn.Module, ModuleUtilsMixin):
             head_mask, self.config.num_hidden_layers)
         pinyin_emb = None
         if py2ids is not None:
-            py_emb = self.py_emb(py2ids)
+            py_emb = self.py_emb(py2ids, max_sen_len)
             pinyin_emb = py_emb
         if sk2ids is not None:
-            sk_emb = self.sk_emb(sk2ids)
+            sk_emb = self.sk_emb(sk2ids, max_sen_len)
             if pinyin_emb is not None:
                 pinyin_emb += sk_emb
         embedding_output = self.embeddings(
@@ -158,16 +202,64 @@ class BertModel(torch.nn.Module, ModuleUtilsMixin):
             head_mask=head_mask
         )
         sequence_output = encoder_outputs[0]
-        logits = self.cls(sequence_output)
-        return logits
+        return sequence_output
+
+
+class JDNerModel(nn.Module):
+    def __init__(self, args) -> None:
+        super().__init__()
+        self.args = args
+        self.config = BertConfig.from_pretrained(self.args.bert_checkpoint)
+        self.bert = BertModel(self.config, args)
+        # self.bert = BertModel.from_pretrained(
+        # self.args.bert_checkpoint, args=args)
+        num_labels = self.args.number_tag
+        self.add_lstm = self.args.lstm
+        if self.add_lstm:
+            self.is_bilstm = self.args.is_bilstm
+            self.lstm_hidden = self.args.lstm_hidden
+            self.lstm = nn.LSTM(self.config.hidden_size, self.lstm_hidden,
+                                batch_first=True, bidirectional=self.is_bilstm, dropout=0.5)
+            linear_hidden = self.lstm_hidden*2 if self.is_bilstm else self.lstm_hidden
+        else:
+            linear_hidden = self.config.hidden_size
+        self.cls = nn.Linear(linear_hidden, num_labels)
+        self.crf = CRF(num_labels, batch_first=True)
+
+    def forward(self, input_ids, input_mask, pinyin_ids=None, stroke_ids=None, lmask=None, labelids=None, max_sen_len=512):
+        sequence_output = self.bert(
+            input_ids=input_ids, attention_mask=input_mask, py2ids=pinyin_ids, sk2ids=stroke_ids, max_sen_len=max_sen_len)
+        if self.add_lstm:
+            sequence_output, _ = self.lstm(sequence_output)
+            sequence_output = sequence_output*input_mask.unsqueeze(-1)
+        cls_output = self.cls(sequence_output)
+        # crf 训练
+        loss = -self.crf(cls_output, labelids, mask=lmask)
+        return loss
+
+    def decode(self, input_ids, input_mask, pinyin_ids=None, stroke_ids=None, lmask=None, labelids=None, max_sen_len=None):
+        sequence_output = self.bert(
+            input_ids=input_ids, attention_mask=input_mask, py2ids=pinyin_ids, sk2ids=stroke_ids, max_sen_len=max_sen_len)
+        if self.add_lstm:
+            sequence_output, _ = self.lstm(sequence_output)
+        cls_output = self.cls(sequence_output)
+        # crf 训练
+        loss = -self.crf(cls_output, labelids, mask=lmask)
+        predict_tag = self.crf.decode(cls_output, mask=lmask)
+        return predict_tag, loss
 
     def load_from_transformers_state_dict(self, gen_fp):
+        """
+        从transformers加载预训练权重
+        :param gen_fp:
+        :return:
+        """
         state_dict = OrderedDict()
         gen_state_dict = torch.load(gen_fp)
         for k, v in gen_state_dict.items():
             name = k
-            if name.startswith('bert'):
-                name = name[5:]
+            # if name.startswith('bert'):
+            #     name = name[5:]
             # if name.startswith('encoder'):
             #     name = f'corrector.{name[8:]}'
             if 'gamma' in name:
@@ -178,7 +270,7 @@ class BertModel(torch.nn.Module, ModuleUtilsMixin):
         self.load_state_dict(state_dict, strict=False)
 
 
-class JDNerTrainingModel(pl.LightningModule):
+class CRFNerTrainingModel(pl.LightningModule):
     def __init__(self, arguments):
         super().__init__()
         self.args = arguments
@@ -188,38 +280,92 @@ class JDNerTrainingModel(pl.LightningModule):
         with open(label2id_path, 'r') as f:
             label2ids = json.load(f)
         self.id2label = {v: k for k, v in label2ids.items()}
-        self.config = BertConfig.from_pretrained(self.args.bert_checkpoint)
-        self.bert = BertModel(self.config, arguments)
+        self.model = JDNerModel(arguments)
         # torch.save(self.bert.state_dict(), "data/init.pt")
-        self.crf = CRF(num_labels, batch_first=True)
-        self._device = self.args.device
-        self.min_loss = float('inf')
+        self.adv = arguments.adv
+        if self.adv == "fgm":
+            self.adv_model = FGM(self.model)
+            # 加了对抗学习，要关闭LightningModule模块的自动优化功能
+            self.automatic_optimization = False
+        elif self.adv == 'pgd':
+            self.adv_model = PGD(self.model)
+            self.automatic_optimization = False
 
-    def forward(self, input_ids, input_mask, pinyin_ids=None, stroke_ids=None, lmask=None, labelids=None):
-        sequence_output = self.bert(
-            input_ids=input_ids, attention_mask=input_mask, py2ids=pinyin_ids, sk2ids=stroke_ids)
-        # crf 训练
-        loss = -self.crf(sequence_output, labelids, mask=lmask)
+    def forward(self, input_ids, input_mask, pinyin_ids=None, stroke_ids=None, lmask=None, labelids=None, max_sen_len=512):
+        loss = self.model(input_ids, input_mask, pinyin_ids,
+                          stroke_ids, lmask, labelids, max_sen_len)
         return loss
+
+    def adv_fgm_model(self, fgm_model, input_ids, input_mask, pinyin_ids=None, stroke_ids=None, lmask=None, labelids=None, max_sen_len=512):
+        # 对抗训练
+        fgm_model.attack(epsilon=self.args.epsilon)  # 在embedding上添加对抗扰动
+        # crf 训练
+        loss_adv = self.model(input_ids, input_mask, pinyin_ids,
+                              stroke_ids, lmask, labelids, max_sen_len)
+        self.manual_backward(loss_adv)
+        fgm_model.restore()
+        return loss_adv.item()
+
+    def adv_pgd_model(self, pgd_model, input_ids, input_mask, pinyin_ids=None, stroke_ids=None, lmask=None, labelids=None, max_sen_len=512):
+        pgd_model.backup_grad()
+        K = self.args.pgd_K
+        # 对抗训练
+        loss_advs = []
+        for t in range(K):
+            # 在embedding上添加对抗扰动, first attack时备份param.data
+            pgd_model.attack(epsilon=self.args.epsilon,
+                             is_first_attack=(t == 0))
+            if t != K - 1:
+                self.model.zero_grad()
+            else:
+                pgd_model.restore_grad()
+
+            # crf 训练
+            loss_adv = self.model(input_ids, input_mask, pinyin_ids,
+                                  stroke_ids, lmask, labelids, max_sen_len)
+            self.manual_backward(loss_adv)  # 反向传播，并在正常的grad基础上，累加对抗训练的梯度
+            loss_advs.append(loss_adv.item())
+        pgd_model.restore()  #
+        return np.array(loss_advs).mean()
 
     def training_step(self, batch, batch_idx):
         input_ids, input_mask, pinyin_ids = batch['input_ids'], batch['input_mask'], batch['pinyin_ids']
         stroke_ids, lmask, labelids = batch['stroke_ids'], batch['lmask'], batch['labels']
-        loss = self.forward(input_ids, input_mask,
-                            pinyin_ids, stroke_ids, lmask, labelids)
-        # loss = self.forward(input_ids, input_mask,
-        #                     lmask=lmask, labelids=labelids)
+        length = batch['length']
+        max_sen_len = max(length)
+        if not self.automatic_optimization:
+            opt = self.optimizers()
+            scheduler = self.lr_schedulers()
+            opt.zero_grad()
+
+        # loss = self.model(input_ids, input_mask,
+        #                     pinyin_ids, stroke_ids, lmask, labelids)
+        loss = self.model(input_ids, input_mask,
+                          lmask=lmask, labelids=labelids, max_sen_len=max_sen_len)
+        if not self.automatic_optimization:
+            self.manual_backward(loss)
+            opt.step()
+            scheduler.step()
+        if self.adv == "fgm":
+            self.adv_loss = self.adv_fgm_model(self.adv_model, input_ids, input_mask,
+                                               lmask=lmask, labelids=labelids, max_sen_len=max_sen_len)
+        elif self.adv == 'pgd':
+            self.adv_loss = self.adv_pgd_model(self.adv_model, input_ids, input_mask,
+                                               lmask=lmask, labelids=labelids, max_sen_len=max_sen_len)
+        return loss
+
+    def training_step_end(self, loss):
+        self.log("loss", loss, on_step=True, prog_bar=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
         input_ids, input_mask, pinyin_ids = batch['input_ids'], batch['input_mask'], batch['pinyin_ids']
         stroke_ids, lmask, labelids = batch['stroke_ids'], batch['lmask'], batch['labels']
         length = batch['length']
-        # sequence_output = self.bert(input_ids=input_ids, attention_mask=input_mask, py2ids=pinyin_ids, sk2ids=stroke_ids)
-        sequence_output = self.bert(
-            input_ids=input_ids, attention_mask=input_mask, py2ids=None, sk2ids=None)
-        val_loss = self.crf(sequence_output, labelids, mask=lmask)
-        predict_tag = self.crf.decode(sequence_output, mask=lmask)
+        max_sen_len = max(length)
+        # sequence_output = self.model.decode(input_ids=input_ids, attention_mask=input_mask, py2ids=pinyin_ids, sk2ids=stroke_ids)
+        predict_tag, val_loss = self.model.decode(input_ids, input_mask,
+                                                  lmask=lmask, labelids=labelids, max_sen_len=max_sen_len)
         val_loss = val_loss.cpu().detach().numpy()
         labelids = labelids.cpu().detach().numpy()
         return (labelids, predict_tag, val_loss, length)
@@ -243,10 +389,10 @@ class JDNerTrainingModel(pl.LightningModule):
 
         precision, recall, f1 = self.entity_metric(
             target_labels, predict_labels, target_length)
-        self.log("char_acc", char_acc, prog_bar=True)
-        self.log("pre", precision)
-        self.log("recall", recall)
-        self.log("f1", f1, prog_bar=True)
+        self.log("char_acc", float(char_acc), prog_bar=True)
+        self.log("pre", float(precision), prog_bar=True)
+        self.log("recall", float(recall), prog_bar=True)
+        self.log("f1", float(f1), prog_bar=True)
 
     def word_metric(self, target, predict, length):
         """字符级指标计算
@@ -338,7 +484,27 @@ class JDNerTrainingModel(pl.LightningModule):
         self.validation_epoch_end(outputs)
 
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(self.parameters(), lr=self.args.lr)
+        param_optimizer = list(self.named_parameters())
+        no_decay = ['bias', "LayerNorm.weight"]
+        optimizer_grouped_parameters = [
+            {"params": [p for n, p in param_optimizer if not any(
+                nd in n for nd in no_decay) and "bert" in n], "weight_decay":0.8, "lr":self.args.lr},
+            {"params": [p for n, p in param_optimizer if any(
+                nd in n for nd in no_decay) and "bert" in n], "weight_decay":0.0, "lr":self.args.lr},
+            {"params": [p for n, p in param_optimizer if not any(
+                [nd in n for nd in no_decay]) and 'bert' not in n], "weight_decay":0.8, 'lr':self.args.no_bert_lr},
+            {"params": [p for n, p in param_optimizer if any(
+                [nd in n for nd in no_decay]) and 'bert'not in n], 'weigth_decay':0.0, 'lr':self.args.no_bert_lr}
+        ]
+        # optimizer_grouped_parameters = [
+        #     {"params": [p for n, p in param_optimizer if "bert" in n],
+        #         "weight_decay":0.8, "lr":self.args.lr},
+        #     {"params": [p for n, p in param_optimizer if "bert" not in n],
+        #         "weight_decay":0.0, "lr":self.args.no_bert_lr},
+        # ]
+        # optimizer_grouped_parameters = self.parameters()
+        optimizer = torch.optim.AdamW(
+            optimizer_grouped_parameters, lr=self.args.lr)
         scheduler = LambdaLR(optimizer,
                              lr_lambda=lambda step: min((step + 1) ** -0.5,
                                                         (step + 1) * self.args.warmup_epochs ** (-1.5)),
@@ -351,4 +517,4 @@ class JDNerTrainingModel(pl.LightningModule):
         :param gen_fp:
         :return:
         """
-        self.bert.load_from_transformers_state_dict(gen_fp)
+        self.model.load_from_transformers_state_dict(gen_fp)

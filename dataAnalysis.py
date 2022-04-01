@@ -7,6 +7,7 @@
 @License :   (C)Copyright 2021-2022, Liugroup-NLPR-CASIA
 @Desc    :   None
 '''
+
 import json
 from collections import defaultdict
 from pypinyin import pinyin, Style, lazy_pinyin
@@ -15,10 +16,11 @@ import re
 import os
 from random import shuffle
 from tqdm import tqdm
+# from LAC import LAC
 
 
 def read_sample_file():
-    with open("data/train_500.txt", 'r') as f:
+    with open("data/2022京东电商数据比赛/京东商品标题实体识别数据集/train_data/train.txt", 'r') as f:
         lines = f.readlines()
 
     entities = defaultdict(list)
@@ -109,11 +111,12 @@ def read_sample_file():
         for line in train_text:
             f.write(line+"\n")
 
-    with open("data/train.txt", 'w') as f:
+    with open("data/val.txt", 'w') as f:
         for line in val_text:
             f.write(line+"\n")
 
     with open("data/entites.json", 'w') as f:
+        entities = {k: list(set(v)) for k, v in entities.items()}
         json.dump(entities, f, ensure_ascii=False)
 
     labels = entities.keys()
@@ -130,6 +133,10 @@ def read_sample_file():
 
     with open("data/label2ids.json", 'w') as f:
         json.dump(label2ids, f, ensure_ascii=False)
+
+    entity2ids = {k: i for i, k in enumerate(labels)}
+    with open("data/entity2ids.json", 'w') as f:
+        json.dump(entity2ids, f, ensure_ascii=False)
 
     return samples, texts, entities, text_entity_pair
 
@@ -255,7 +262,42 @@ def pretrain_data():
     # print("去重后数据:", len(no_duplicates))
 
 
+def baidu_lac():
+    """n	普通名词	f	方位名词	s	处所名词	nw	作品名
+        nz	其他专名	v	普通动词	vd	动副词	vn	名动词
+        a	形容词	ad	副形词	an	名形词	d	副词
+        m	数量词	q	量词	r	代词	p	介词
+        c	连词	u	助词	xc	其他虚词	w	标点符号
+        PER	人名	LOC	地名	ORG	机构名	TIME	时间
+
+    Args:
+        text (_type_): _description_
+    """
+    lac = LAC()
+    with open("data/pretrain_train_data.txt", 'r') as f:
+        lines = f.readlines()
+
+    number = len(lines)
+    batch_size = 20
+    all_text = []
+    for i in tqdm(range(0, number, batch_size)):
+        batch_text = lines[i:i+batch_size]
+        batch_text = [t.strip() for t in batch_text]
+        result = lac.run(batch_text)
+        for text, label in result:
+            text_label = []
+            for w, l in zip(*(text, label)):
+                text_label.append("\t".join((w, l)))
+            all_text.append(text_label)
+    with open("data/pretrain_train_data_label.txt", 'w') as f:
+        for line in all_text:
+            for l in line:
+                f.write(l+"\n")
+            f.write("\n")
+
+
 if __name__ == "__main__":
-    # read_sample_file()
+    read_sample_file()
     # get_pinyin_vocab()
-    pretrain_data()
+    # pretrain_data()
+    # baidu_lac()

@@ -5,6 +5,7 @@
 @Email  :   abtion{at}outlook.com
 """
 from ast import arg
+from secrets import choice
 import torch
 import json
 import numpy as np
@@ -12,23 +13,37 @@ from torch.utils.data import Dataset, DataLoader
 from utils import load_json
 from pinyin_tool import PinyinTool
 from transformers.models.bert.tokenization_bert import BertTokenizer
+import random
+import synonyms
 
 
 class NerDataset(Dataset):
-    def __init__(self, fp, args):
+    def __init__(self, fp, args, is_train=True):
         super().__init__()
         self.data = load_json(fp)
+        self.model_type = args.model_type
         self.space_char = "[unused1]"
 
         py_dict_path = './pinyin_data/zi_py.txt'
         py_vocab_path = './pinyin_data/py_vocab.txt'
         sk_dict_path = './stroke_data/zi_sk.txt'
         sk_vocab_path = './stroke_data/sk_vocab.txt'
-        label2id_path = args.label_file
-        with open(label2id_path, 'r') as f:
+
+        with open(args.label_file, 'r') as f:
             self.label2ids = json.load(f)
 
-        self.number_tag = len(self.label2ids)
+        with open(args.entity_label_file, 'r') as f:
+            self.entity2ids = json.load(f)
+
+        entity_path = args.entity_path
+        with open(entity_path, 'r') as f:
+            self.entities = json.load(f)
+
+        self.is_train = is_train
+        if args.model_type == "crf":
+            self.number_tag = len(self.label2ids)
+        else:
+            self.number_tag = len(self.entity2ids)
         self.tokenizer = BertTokenizer.from_pretrained(args.bert_checkpoint)
 
         self.pytool = PinyinTool(
@@ -63,6 +78,8 @@ class NerDataset(Dataset):
         if len(tokens) > self.max_sen_len - 2:
             tokens = tokens[0:(self.max_sen_len - 2)]
             labels = labels[0:(self.max_sen_len - 2)]
+        if self.is_train and random.random() < 0.5:
+            tokens, labels = self.EDA(tokens, labels)
 
         _tokens = []
         _labels = []
@@ -71,39 +88,47 @@ class NerDataset(Dataset):
         stroke_ids = []
         _tokens.append("[CLS]")
         _lmask.append(1)
-        _labels.append(self.label2ids["O"])
+        _labels.append("O")
         pinyin_ids.append(np.zeros(self.pylen))
         stroke_ids.append(np.zeros(self.sklen))
         for token, label in zip(tokens, labels):
             _tokens.append(token.lower())
-            _labels.append(self.label2ids[label])
+            _labels.append(label)
             _lmask.append(1)
             pyid = self.pytool.get_pinyin_id(token)
             pinyin_ids.append(self.PYID2SEQ[pyid, :])
             skid = self.sktool.get_pinyin_id(token)
             stroke_ids.append(self.SKID2SEQ[skid, :])
         _tokens.append("[SEP]")
-        _labels.append(self.label2ids["O"])
+        _labels.append("O")
         _lmask.append(1)
         pinyin_ids.append(np.zeros(self.pylen))
         stroke_ids.append(np.zeros(self.sklen))
+
         input_ids = self.tokenizer.convert_tokens_to_ids(_tokens)
 
         length = len(input_ids)
-        # The mask has 1 for real tokens and 0 for padding tokens. Only real
-        # tokens are attended to.
+        # The mask has 1 for real tokens and 0 for padding tokens. Only real tokens are attended to.
         input_mask = [1] * length
         # Zero-pad up to the sequence length.
-        while len(input_ids) < self.max_sen_len:
-            input_ids.append(0)
-            input_mask.append(0)
-            pinyin_ids.append(np.zeros(self.pylen))
-            stroke_ids.append(np.zeros(self.sklen))
-            _labels.append(self.label2ids["O"])
-            _lmask.append(0)
-        pinyin_ids = np.vstack(pinyin_ids)
-        stroke_ids = np.vstack(stroke_ids)
-        return {"input_ids": input_ids, "length": length, "input_mask": input_mask, "pinyin_ids": pinyin_ids, "stroke_ids": stroke_ids, "labels": _labels, "lmask": _lmask}
+        # while len(input_ids) < self.max_sen_len:
+        #     input_ids.append(0)
+        #     input_mask.append(0)
+        #     pinyin_ids.append(np.zeros(self.pylen))
+        #     stroke_ids.append(np.zeros(self.sklen))
+        #     _labels.append(self.label2ids["O"])
+        #     _lmask.append(0)
+        # pinyin_ids = np.vstack(pinyin_ids)
+        # stroke_ids = np.vstack(stroke_ids)
+        pointer_label = torch.zeros((self.number_tag, length, length))
+
+        entity_span = self.build_entity(_labels)
+        for lab, start, end in entity_span:
+            # 在句子中512x512，句子前要放cls，所以这里的位置都要加一
+            pointer_label[self.entity2ids[lab], start, end] = 1
+        _labels = [self.label2ids[l] for l in _labels]
+        return {"input_ids": input_ids, "length": length, "input_mask": input_mask, "pinyin_ids": pinyin_ids, "stroke_ids": stroke_ids,
+                "labels": _labels, "pointer_label": pointer_label, "lmask": _lmask, "pylen": self.pylen, "sklen": self.sklen, "labelOid": self.label2ids["O"]}
 
     def get_zi_py_matrix(self):
         pysize = 430
@@ -117,23 +142,134 @@ class NerDataset(Dataset):
             matrix[tokenid][pyid] = 1.
         return np.asarray(matrix, dtype=np.float32)
 
+    def EDA(self, tokens, labels):
+        """实体识别的数据增强技术
+
+        Args:
+            tokens (_type_): _description_
+            labels (_type_): _description_
+        """
+        entities = []
+        tmp_ent = ""
+        start = 0
+        for index, tag in enumerate(labels):
+            if tag.startswith("B"):
+                if tmp_ent:
+                    entities.append((tmp_ent, tokens[start:index]))
+                start = index
+                tmp_ent = tag[2:]
+            elif tag.startswith("O"):
+                if tmp_ent and tmp_ent != "O":
+                    entities.append((tmp_ent, tokens[start:index]))
+                    start = index
+                tmp_ent = "O"
+        if tmp_ent:
+            entities.append((tmp_ent, tokens[start:index]))
+            tmp_ent = ""
+        new_tokens = []
+        new_labels = []
+        number = len(entities)
+        is_choiced = False
+        for i in range(number):
+            line = entities[i]
+            lab, token = line
+            if lab == "O":
+                new_tokens.extend(token)
+                new_labels.extend(["O"]*len(token))
+                continue
+            elif not is_choiced:
+                prob = random.random()
+                if prob < 0.3:
+                    # lab_entites = self.entities[lab]
+                    # choice_ent = random.choice(lab_entites)
+                    # 采用同义词查找
+                    choice_ent = synonyms.nearby("".join(token))
+                    choice_ent = [word for word, pro in zip(
+                        *choice_ent) if 1 > pro > 0.66]
+                    if len(choice_ent) != 0:
+                        choice_ent = random.choice(choice_ent)
+                        is_choiced = True
+                        choice_ent_list = list(choice_ent)
+                        choice_ent_list = [
+                            l if len(l.strip()) else self.space_char for l in choice_ent_list]
+                    else:
+                        choice_ent_list = token
+
+                    new_tokens.extend(choice_ent_list)
+                    new_labels.extend(
+                        ["B-"+lab if i == 0 else "I-"+lab for i in range(len(choice_ent_list))])
+                else:
+                    new_tokens.extend(token)
+                    new_labels.extend(
+                        ["B-"+lab if i == 0 else "I-"+lab for i in range(len(token))])
+            else:
+                new_tokens.extend(token)
+                new_labels.extend(
+                    ["B-"+lab if i == 0 else "I-"+lab for i in range(len(token))])
+        return new_tokens, new_labels
+
+    def build_entity(self, tags):
+        """构建实体span
+
+        Args:
+            tags (_type_): _description_
+        """
+        entities = []
+        tmp_ent = ""
+        start = 0
+        for index, tag in enumerate(tags):
+            if tag.startswith("B"):
+                if tmp_ent:
+                    entities.append((tmp_ent, start, index))
+                    tmp_ent = ""
+                start = index
+                tmp_ent = tag[2:]
+            elif tag.startswith("O"):
+                if tmp_ent:
+                    entities.append((tmp_ent, start, index))
+                    tmp_ent = ""
+                start = index
+        if tmp_ent:
+            entities.append((tmp_ent, start, index))
+            tmp_ent = ""
+        return entities
+
 
 def collate_fn(batches):
+    max_length = max([batch['length'] for batch in batches])
     input_ids = []
     input_masks = []
     pinyin_ids = []
     stroke_ids = []
     labels = []
+    pointer_labels = []
     lmasks = []
     lengthes = []
     for batch in batches:
-        input_ids.append(batch['input_ids'])
-        input_masks.append(batch['input_mask'])
-        pinyin_ids.append(batch['pinyin_ids'])
-        stroke_ids.append(batch['stroke_ids'])
-        labels.append(batch['labels'])
-        lmasks.append(batch['lmask'])
+        length = batch['length']
+        pylen = batch["pylen"]
+        sklen = batch['sklen']
+        labelOid = batch["labelOid"]
+        input_ids.append(batch['input_ids']+[0]*(max_length-length))
+        input_masks.append(batch['input_mask']+[0]*(max_length-length))
+        pinyin_id = batch['pinyin_ids'] + \
+            [np.zeros(((max_length-length), pylen))]
+        pinyin_id = np.vstack(pinyin_id)
+        pinyin_ids.append(pinyin_id)
+        stroke_id = batch['stroke_ids'] + \
+            [np.zeros(((max_length-length), sklen))]
+        stroke_id = np.vstack(stroke_id)
+        stroke_ids.append(stroke_id)
+        labels.append(batch['labels']+[labelOid]*(max_length-length))
+        lmasks.append(batch['lmask']+[0]*(max_length-length))
         lengthes.append(batch['length'])
+        pointer_label = batch['pointer_label']
+        num = pointer_label.shape[0]
+        pad_1 = np.zeros((num, length, (max_length-length)))
+        pad_2 = np.zeros((num, (max_length-length), max_length))
+        pointer_label = np.concatenate([pointer_label, pad_1], axis=2)
+        pointer_label = np.concatenate([pointer_label, pad_2], axis=1)
+        pointer_labels.append(pointer_label)
 
     input_ids = torch.tensor(input_ids, dtype=torch.long)
     input_masks = torch.tensor(input_masks, dtype=torch.float32)
@@ -142,4 +278,8 @@ def collate_fn(batches):
     labels = torch.tensor(labels, dtype=torch.long)
     lmasks = torch.tensor(lmasks, dtype=torch.float)
     lmasks = lmasks.type(torch.ByteTensor)
-    return {"input_ids": input_ids, "length": lengthes, "input_mask": input_masks, "pinyin_ids": pinyin_ids, "stroke_ids": stroke_ids, "labels": labels, "lmask": lmasks}
+    pointer_labels = torch.from_numpy(
+        np.stack(pointer_labels)).type(torch.long)
+
+    return {"input_ids": input_ids, "length": lengthes, "input_mask": input_masks, "pinyin_ids": pinyin_ids, "stroke_ids": stroke_ids,
+            "labels": labels, "lmask": lmasks, "pointer_labels": pointer_labels}
