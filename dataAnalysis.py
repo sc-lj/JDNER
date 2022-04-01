@@ -624,10 +624,10 @@ def choice_high_entity():
 
 
 if __name__ == "__main__":
-    # read_sample_file()
+    read_sample_file()
     # get_pinyin_vocab()
     # pretrain_data()
     # baidu_lac()
     # collect_duplicates_entity_data()
-    correct_text()
+    # correct_text()
     # choice_high_entity()
