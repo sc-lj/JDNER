@@ -17,10 +17,10 @@ from transformers import (
     AutoModelWithLMHead,
     EvalPrediction,
     HfArgumentParser,
-    Trainer,
     TrainingArguments,
     set_seed,
 )
+from transformers import Trainer
 from preprocess import DataProcessor
 from datautils import NerDataset
 from modeling import NERModel

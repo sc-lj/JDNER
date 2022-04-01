@@ -5,11 +5,11 @@ from torch import nn
 from torch.nn import CrossEntropyLoss
 
 from transformers import AutoModelForTokenClassification, AutoConfig
-from transformers.modeling_auto import (
+from transformers import (
     MODEL_FOR_TOKEN_CLASSIFICATION_MAPPING,
-    PretrainedConfig,
-    OrderedDict,
+    PretrainedConfig
 )
+from collections import OrderedDict
 from transformers.modeling_outputs import TokenClassifierOutput
 from loss import DiceLoss, FocalLoss, LabelSmoothingCrossEntropy
 from crfutils import ConditionalRandomField

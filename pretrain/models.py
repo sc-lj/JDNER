@@ -4,7 +4,6 @@
 @Author :   Abtion
 @Email  :   abtion{at}outlook.com
 """
-from cmath import log
 import os
 import json
 from collections import OrderedDict
@@ -37,14 +36,14 @@ class EmbeddingNetwork(nn.Module):
         )
         self.MAX_SEN_LEN = max_sen_len
 
-    def forward(self, sen_pyids):
+    def forward(self, sen_pyids,max_sen_len):
         sen_pyids = sen_pyids.reshape(-1, self.seq_len)
         sen_emb = self.pyemb(sen_pyids)
         sen_emb = sen_emb.reshape(-1, self.seq_len, self.PYDIM)
         all_out, final_out = self.gru(sen_emb)
         final_out = final_out.mean(0, keepdim=True)
         lstm_output = final_out.reshape(
-            shape=[-1, self.MAX_SEN_LEN, self.config.hidden_size])
+            shape=[-1, max_sen_len, self.config.hidden_size])
 
         return lstm_output
 
@@ -112,7 +111,8 @@ class BertModel(torch.nn.Module, ModuleUtilsMixin):
         position_ids=None,
         head_mask=None,
         py2ids=None,
-        sk2ids=None
+        sk2ids=None,
+        max_sen_len=None
     ):
         input_shape = input_ids.size()
         batch_size, seq_length = input_shape
@@ -138,10 +138,10 @@ class BertModel(torch.nn.Module, ModuleUtilsMixin):
             head_mask, self.config.num_hidden_layers)
         pinyin_emb = None
         if py2ids is not None:
-            py_emb = self.pyemb(py2ids)
+            py_emb = self.pyemb(py2ids,max_sen_len)
             pinyin_emb = py_emb
         if sk2ids is not None:
-            sk_emb = self.skemb(sk2ids)
+            sk_emb = self.skemb(sk2ids,max_sen_len)
             if pinyin_emb is not None:
                 pinyin_emb += sk_emb
         embedding_output = self.embeddings(
@@ -186,45 +186,55 @@ class JDNerTrainingModel(pl.LightningModule):
         self.id2label = {v: k for k, v in label2ids.items()}
         self.config = BertConfig.from_pretrained(self.args.bert_checkpoint)
         self.bert = BertModel(self.config, arguments)
+        # bert_static = torch.load("lightning_logs/plome/checkpoints/bert.pt",map_location="cpu")
+        # self.bert.load_state_dict(bert_static)
         self.cls = nn.Linear(self.config.hidden_size, arguments.num_labels)
+        # cls_static = torch.load("lightning_logs/plome/checkpoints/cls.pt",map_location="cpu")
+        # self.cls.load_state_dict(cls_static)
         self.py_cls = nn.Linear(self.config.hidden_size,
                                 arguments.py_num_labels)
+        # _py_cls_static = torch.load("lightning_logs/plome/checkpoints/py_cls.pt",map_location="cpu")
+        # self.py_cls.load_state_dict(_py_cls_static)            
         self.loss_function = nn.CrossEntropyLoss(ignore_index=-100)
         self.py_loss_function = nn.CrossEntropyLoss(ignore_index=-100)
 
         self.min_loss = float('inf')
 
-    def forward(self, input_ids, input_mask, masked_pinyin_ids, masked_sk_ids, pinyin_ids=None, lmask=None, labelids=None):
+    def forward(self, input_ids, input_mask, masked_pinyin_ids=None, masked_sk_ids=None, pinyin_ids=None, lmask=None, labelids=None,max_sen_len=512):
         sequence_output = self.bert(
-            input_ids=input_ids, attention_mask=input_mask, py2ids=masked_pinyin_ids, sk2ids=masked_sk_ids)
+            input_ids=input_ids, attention_mask=input_mask, py2ids=None, sk2ids=None,max_sen_len=max_sen_len)
         lmask = ~lmask.type(torch.bool)
         labelids = torch.masked_fill(labelids, lmask, torch.tensor(-100))
         labelids = labelids.reshape(-1)
-        pinyin_ids = torch.masked_fill(
-            pinyin_ids, lmask, torch.tensor(-100))
-        pinyin_ids = pinyin_ids.reshape(-1)
+        # pinyin_ids = torch.masked_fill(
+        #     pinyin_ids, lmask, torch.tensor(-100))
+        # pinyin_ids = pinyin_ids.reshape(-1)
         logits = self.cls(sequence_output)
         logits = logits.reshape(-1, self.args.num_labels)
         loss = self.loss_function(logits, labelids)
-        py_logit = self.py_cls(sequence_output)
-        py_logit = py_logit.reshape(-1, self.args.py_num_labels)
-        py_loss = self.py_loss_function(py_logit, pinyin_ids)
-        return loss + py_loss
+        # py_logit = self.py_cls(sequence_output)
+        # py_logit = py_logit.reshape(-1, self.args.py_num_labels)
+        # py_loss = self.py_loss_function(py_logit, pinyin_ids)
+        return {"loss":loss}
 
     def training_step(self, batch, batch_idx):
         input_ids, input_mask, pinyin_ids = batch['input_ids'], batch['input_mask'], batch['pinyin_ids']
         masked_pinyin_ids, lmask, labelids = batch['masked_pinyin_ids'], batch['lmask'], batch['labels']
         masked_sk_ids = batch['masked_sk_ids']
-        loss = self.forward(input_ids, input_mask, masked_pinyin_ids, masked_sk_ids,
-                            pinyin_ids, lmask, labelids)
+        max_sen_len = max(batch['length'])
+        # loss = self.forward(input_ids, input_mask, masked_pinyin_ids, masked_sk_ids,
+        #                     pinyin_ids, lmask, labelids,max_sen_len)
+        loss = self.forward(input_ids, input_mask, lmask= lmask, labelids=labelids,max_sen_len=max_sen_len)
         return loss
 
     def validation_step(self, batch, batch_idx):
         input_ids, input_mask, pinyin_ids = batch['input_ids'], batch['input_mask'], batch['pinyin_ids']
         masked_pinyin_ids, lmask, labelids = batch['masked_pinyin_ids'], batch['lmask'], batch['labels']
         masked_sk_ids = batch['masked_sk_ids']
-        loss = self.forward(input_ids, input_mask, masked_pinyin_ids, masked_sk_ids,
-                            pinyin_ids, lmask, labelids)
+        max_sen_len = max(batch['lengthes'])
+        # loss = self.forward(input_ids, input_mask, masked_pinyin_ids, masked_sk_ids,
+        #                     pinyin_ids, lmask, labelids,max_sen_len)
+        loss = self.forward(input_ids, input_mask,lmask= lmask, labelids=labelids,max_sen_len=max_sen_len)
         return loss.cpu().numpy()
 
     def on_validation_epoch_start(self) -> None:

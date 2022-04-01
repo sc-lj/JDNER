@@ -12,18 +12,18 @@ class ModelArguments:
     Arguments pertaining to which model/config/tokenizer we are going to fine-tune from.
     """
 
-    model_name_or_path: str = field(
+    model_name_or_path: str = field(default="models/checkpoints/checkpoint-49998",
         metadata={
             "help": "Path to pretrained model or model identifier from huggingface.co/models"}
     )
     tokenizer_name_or_path: str = field(
-        default=None, metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
+        default="models/checkpoints/checkpoint-49998", metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
     )
     config_name_or_path: str = field(
-        default=None, metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
+        default="models/checkpoints/checkpoint-49998", metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
     )
     lm_model_name_or_path: str = field(
-        default=None, metadata={"help": "Path to lm model fine-tuned on fba data"}
+        default="models/checkpoints/checkpoint-49998", metadata={"help": "Path to lm model fine-tuned on fba data"}
     )
     loss_func: str = field(
         default="CrossEntropyLoss", metadata={"help": "loss function for token classifer"}
@@ -59,7 +59,7 @@ class ModelArguments:
     cnn_out_channels: int = field(
         default=50, metadata={"help": "cnn output channel size"}
     )
-    use_crf: bool = field(default=False, metadata={
+    use_crf: bool = field(default=True, metadata={
                           "help": "whether to use the crf for decoding."})
     crf_loss_func: str = field(
         default="nll", metadata={"help": "loss function"}
@@ -72,7 +72,7 @@ class DataTrainingArguments:
     Arguments pertaining to what data we are going to input our model for training and eval.
     """
 
-    data_dir: str = field(
+    data_dir: str = field(default="",
         metadata={
             "help": "The input data dir. Should contain the .txt files for a CoNLL-2003-formatted task."}
     )

@@ -5,6 +5,10 @@ __pycache__
 apex
 bio_script
 *.md
-models
 GAIIC*
 LSTM-CRF
+readme.txt
+setup.sh
+chinese_bert_base
+apex
+models

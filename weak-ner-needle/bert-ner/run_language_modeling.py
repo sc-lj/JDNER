@@ -45,24 +45,24 @@ class ModelArguments:
     """
 
     model_name_or_path: Optional[str] = field(
-        default=None,
+        default="hfl/chinese-roberta-wwm-ext",
         metadata={
             "help": "The model checkpoint for weights initialization. Leave None if you want to train a model from scratch."
         },
     )
     model_type: Optional[str] = field(
-        default=None,
+        default="hfl/chinese-roberta-wwm-ext",
         metadata={
             "help": "If training from scratch, pass a model type from the list: " + ", ".join(MODEL_TYPES)},
     )
     config_name: Optional[str] = field(
-        default=None, metadata={"help": "Pretrained config name or path if not the same as model_name"}
+        default="hfl/chinese-roberta-wwm-ext", metadata={"help": "Pretrained config name or path if not the same as model_name"}
     )
     tokenizer_name: Optional[str] = field(
-        default=None, metadata={"help": "Pretrained tokenizer name or path if not the same as model_name"}
+        default="hfl/chinese-roberta-wwm-ext", metadata={"help": "Pretrained tokenizer name or path if not the same as model_name"}
     )
     cache_dir: Optional[str] = field(
-        default=None, metadata={"help": "Where do you want to store the pretrained models downloaded from s3"}
+        default="chinese_bert_base", metadata={"help": "Where do you want to store the pretrained models downloaded from s3"}
     )
 
 
@@ -73,7 +73,7 @@ class DataTrainingArguments:
     """
 
     train_data_file: Optional[str] = field(
-        default=None, metadata={"help": "The input training data file (a text file)."}
+        default="data/train_data/unlabeled_train_data.txt", metadata={"help": "The input training data file (a text file)."}
     )
     eval_data_file: Optional[str] = field(
         default=None,
@@ -81,13 +81,13 @@ class DataTrainingArguments:
             "help": "An optional input evaluation data file to evaluate the perplexity on (a text file)."},
     )
     line_by_line: bool = field(
-        default=False,
+        default=True,
         metadata={
             "help": "Whether distinct lines of text in the dataset are to be handled as distinct sequences."},
     )
 
     mlm: bool = field(
-        default=False, metadata={"help": "Train with masked-language modeling loss instead of language modeling."}
+        default=True, metadata={"help": "Train with masked-language modeling loss instead of language modeling."}
     )
     mlm_probability: float = field(
         default=0.15, metadata={"help": "Ratio of tokens to mask for masked language modeling loss"}
@@ -101,6 +101,9 @@ class DataTrainingArguments:
     max_span_length: int = field(
         default=5, metadata={"help": "Maximum length of a span of masked tokens for permutation language modeling."}
     )
+    # output_dir: int = field(
+    #     default="models/", metadata={"help": "The output directory where the model predictions and checkpoints will be written."}
+    # )
 
     block_size: int = field(
         default=-1,
@@ -111,8 +114,18 @@ class DataTrainingArguments:
         },
     )
     overwrite_cache: bool = field(
-        default=False, metadata={"help": "Overwrite the cached training and evaluation sets"}
+        default=True, metadata={"help": "Overwrite the cached training and evaluation sets"}
     )
+
+@dataclass
+class OurTrainingArguments:
+    checkpoint_dir: str = field(default="./models/checkpoints", metadata={"help": "训练过程中的checkpoints的保存路径"})
+    best_dir: str = field(default="./models/best", metadata={"help": "最优模型的保存路径"})
+    do_eval: bool = field(default=False, metadata={"help": "是否在训练时进行评估"})
+    do_train: bool = field(default=True, metadata={"help": "是否在训练时进行评估"})
+    epoch: int = field(default=5, metadata={"help": "训练的epoch"})
+    train_batch_size: int = field(default=15, metadata={"help": "训练时的batch size"})
+    eval_batch_size: int = field(default=50, metadata={"help": "评估时的batch size"})
 
 
 class ParLineByLineTextDataset(LineByLineTextDataset):
@@ -161,8 +174,23 @@ def main():
     # We now keep distinct sets of args, for a cleaner separation of concerns.
 
     parser = HfArgumentParser(
-        (ModelArguments, DataTrainingArguments, TrainingArguments))
-    model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+        (ModelArguments, DataTrainingArguments))
+    # 设定训练参数
+    args = OurTrainingArguments()
+    training_args = TrainingArguments(output_dir=args.checkpoint_dir,  # 训练中的checkpoint保存的位置
+                                      num_train_epochs=args.epoch,
+                                      do_train=True,
+                                      per_device_train_batch_size=args.train_batch_size,
+                                      overwrite_output_dir=True,
+                                      learning_rate=1e-5,
+                                      save_strategy="epoch",
+                                      fp16=True,
+                                      dataloader_num_workers=10,
+                                      label_smoothing_factor=0.1,
+                                      gradient_accumulation_steps=4,
+                                      )
+
+    model_args, data_args = parser.parse_args_into_dataclasses()
 
     if data_args.eval_data_file is None and training_args.do_eval:
         raise ValueError(
@@ -249,10 +277,10 @@ def main():
         )
 
     if data_args.block_size <= 0:
-        data_args.block_size = tokenizer.max_len
+        data_args.block_size = config.max_position_embeddings
         # Our input block size will be the max possible for the model
     else:
-        data_args.block_size = min(data_args.block_size, tokenizer.max_len)
+        data_args.block_size = min(data_args.block_size, config.max_position_embeddings)
 
     # Get datasets
 
@@ -277,7 +305,6 @@ def main():
         data_collator=data_collator,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        prediction_loss_only=True,
     )
     # Training
     if training_args.do_train:
@@ -318,4 +345,6 @@ def main():
 
 
 if __name__ == "__main__":
+    import os
+    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
     main()

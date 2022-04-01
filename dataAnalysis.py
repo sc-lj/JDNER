@@ -196,7 +196,8 @@ def cut_text(texts):
 def preprocess_wiki_data():
     """处理wiki数据集
     """
-    path = "/mnt/disk2/trainData/textData/文本分类数据/wiki_zh"
+    # path = "/mnt/disk2/trainData/textData/文本分类数据/wiki_zh"
+    path = "/mnt/disk2/data/wiki_zh_2019/wiki_zh"
     all_sentences = []
     for root, dirs, filenames in os.walk(path):
         for files in filenames:
@@ -232,6 +233,7 @@ def pretrain_data():
     """
     wiki_data = preprocess_wiki_data()
     # news2016 = preprocess_news2016()
+    # all_data = wiki_data+news2016
     all_data = wiki_data
     shuffle(all_data)
     # no_duplicates = [all_data[0]]
