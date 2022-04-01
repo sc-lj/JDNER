@@ -72,30 +72,32 @@ class DataTrainingArguments:
     Arguments pertaining to what data we are going to input our model for training and eval.
     """
 
-    data_dir: str = field(default="",
-                          metadata={
-                              "help": "The input data dir. Should contain the .txt files for a CoNLL-2003-formatted task."}
-                          )
+    data_dir: str = field(
+        default="data",
+        metadata={
+            "help": "The input data dir. Should contain the .txt files for a CoNLL-2003-formatted task."}
+    )
     labels: Optional[str] = field(
+        default="label2ids.json",
         metadata={
             "help": "Path to a file containing all labels. If not specified, CoNLL-2003 labels are used."}
     )
     train_split: str = field(
-        default="train.txt", metadata={"help": "The file name of training data."}
+        default="train.json", metadata={"help": "The file name of training data."}
     )
     dev_split: str = field(
-        default="dev.txt", metadata={"help": "The file name of training data."}
+        default="val.json", metadata={"help": "The file name of training data."}
     )
     test_split: str = field(
         default="test.txt", metadata={"help": "The file name of training data."}
     )
-    max_seq_length: int = field(
-        default=128,
-        metadata={
-            "help": "The maximum total input sequence length after tokenization. Sequences longer "
-            "than this will be truncated, sequences shorter will be padded."
-        },
-    )
+    # max_seq_length: int = field(
+    #     default=128,
+    #     metadata={
+    #         "help": "The maximum total input sequence length after tokenization. Sequences longer "
+    #         "than this will be truncated, sequences shorter will be padded."
+    #     },
+    # )
     overwrite_cache: bool = field(
         default=False, metadata={"help": "Overwrite the cached training and evaluation sets"}
     )
@@ -127,10 +129,10 @@ class DataTrainingArguments:
 
     # Make self-training labels
     pred_file: str = field(
-        default=None, metadata={"help": "file name of predict data"}
+        default="data/train_data/unlabeled_train_data.txt", metadata={"help": "file name of predict data"}
     )
     save_pred_file: str = field(
-        default=None, metadata={"help": "file name of saving predict data"}
+        default="data/predict_weak_label.txt", metadata={"help": "file name of saving predict data"}
     )
     save_pred_rule: str = field(
         default=None, metadata={"help": "rule name of saving predict data"}
@@ -141,7 +143,7 @@ class DataTrainingArguments:
         default=False, metadata={"help": "if conduct profile"}
     )
     profile_file: str = field(
-        default="dev", metadata={"help": "file name of profile data"}
+        default="train", metadata={"help": "file name of profile data"}
     )
 
     # Turn off Eval
