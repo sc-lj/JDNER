@@ -13,9 +13,9 @@ class ModelArguments:
     """
 
     model_name_or_path: str = field(default="models/checkpoints/checkpoint-49998",
-        metadata={
-            "help": "Path to pretrained model or model identifier from huggingface.co/models"}
-    )
+                                    metadata={
+                                        "help": "Path to pretrained model or model identifier from huggingface.co/models"}
+                                    )
     tokenizer_name_or_path: str = field(
         default="models/checkpoints/checkpoint-49998", metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
     )
@@ -73,9 +73,9 @@ class DataTrainingArguments:
     """
 
     data_dir: str = field(default="",
-        metadata={
-            "help": "The input data dir. Should contain the .txt files for a CoNLL-2003-formatted task."}
-    )
+                          metadata={
+                              "help": "The input data dir. Should contain the .txt files for a CoNLL-2003-formatted task."}
+                          )
     labels: Optional[str] = field(
         metadata={
             "help": "Path to a file containing all labels. If not specified, CoNLL-2003 labels are used."}
