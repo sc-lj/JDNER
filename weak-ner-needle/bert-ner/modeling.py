@@ -46,7 +46,8 @@ def wrapclass(cls):
                                                  out_channels=config.cnn_out_channels,
                                                  kernel_size=kernel_size))
                 self.conv_layers = nn.ModuleList(conv_layers)
-                self.hidden_size += len(self.conv_layers) * config.cnn_out_channels
+                self.hidden_size += len(self.conv_layers) * \
+                    config.cnn_out_channels
             else:
                 for feature in self.feature_list:
                     self.hidden_size += self.features_dict[feature]
@@ -55,7 +56,8 @@ def wrapclass(cls):
             if self.use_crf:
                 inversed_label_map = config.inversed_label_map
                 constraints = allowed_transitions("BIO", inversed_label_map)
-                self.crf_layer = ConditionalRandomField(config.num_labels, constraints)
+                self.crf_layer = ConditionalRandomField(
+                    config.num_labels, constraints)
 
             self.init_weights()
             self.return_list = []
@@ -103,7 +105,8 @@ def wrapclass(cls):
             for i in range(len(self.feature_list)):
                 try:
                     one_feature = features[:, i, :]
-                    feature_embeddings.append(self.feature_embedding[i](one_feature))
+                    feature_embeddings.append(
+                        self.feature_embedding[i](one_feature))
                 except Exception:
                     raise RuntimeError("Encoutnered error embedding feature %s embedding_layer %s feature position %s " %
                                        (one_feature, self.feature_embedding[i], i))
@@ -115,10 +118,13 @@ def wrapclass(cls):
                 cat_feature_embedding = cat_feature_embedding.transpose(1, 2)
 
                 for i in range(len(self.conv_layers)):
-                    conv_feature_embedding = self.conv_layers[i](cat_feature_embedding)
+                    conv_feature_embedding = self.conv_layers[i](
+                        cat_feature_embedding)
                     kernel_size = self.conv_layers[i].kernel_size[0]
-                    conv_feature_embedding_padded = nn.functional.pad(input=conv_feature_embedding, pad=(0, kernel_size - 1))
-                    conv_feature_embedding_padded_t = conv_feature_embedding_padded.transpose(1, 2)
+                    conv_feature_embedding_padded = nn.functional.pad(
+                        input=conv_feature_embedding, pad=(0, kernel_size - 1))
+                    conv_feature_embedding_padded_t = conv_feature_embedding_padded.transpose(
+                        1, 2)
                     cat_features.append(conv_feature_embedding_padded_t)
             else:
                 cat_features += feature_embeddings
@@ -141,7 +147,8 @@ def wrapclass(cls):
                     active_loss = attention_mask.view(-1) == 1
                     active_logits = logits.view(-1, self.num_labels)
                     active_labels = torch.where(
-                        active_loss, labels.view(-1), torch.tensor(loss_fct.ignore_index).type_as(labels)
+                        active_loss, labels.view(-1), torch.tensor(
+                            loss_fct.ignore_index).type_as(labels)
                     )
                     # import pdb; pdb.set_trace()
                     if self.loss_func == "DiceLoss":
@@ -151,7 +158,8 @@ def wrapclass(cls):
                         # import pdb; pdb.set_trace()
                     loss = loss_fct(active_logits, active_labels)
                 else:
-                    loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+                    loss = loss_fct(
+                        logits.view(-1, self.num_labels), labels.view(-1))
             if self.use_crf:
                 # Format input before using CRF layer
                 if labels is not None:
@@ -180,12 +188,14 @@ def wrapclass(cls):
                         null = -(1 - (-nll).exp()).log()
                         if torch.isnan(null).any() or torch.isinf(null).any():
                             nl = (1 - (-nll).exp())
-                            nl = nl + (nl < 1e-4).to(nl).detach() * (1e-4 - nl).detach()
+                            nl = nl + (nl < 1e-4).to(nl).detach() * \
+                                (1e-4 - nl).detach()
                             null = - nl.log()
 
                         loss = (nll * weights + null * (1 - weights)).sum()
                     else:
-                        raise NotImplementedError(f"{self.loss_func} is not implemented")
+                        raise NotImplementedError(
+                            f"{self.loss_func} is not implemented")
                 if "nll" in self.return_list:
                     for i, tag in enumerate(tags):
                         for j, t in enumerate(tag[0]):
@@ -245,7 +255,8 @@ class NERModel(AutoModelForTokenClassification):
             "Model type should be one of {}.".format(
                 config.__class__,
                 cls.__name__,
-                ", ".join(c.__name__ for c in MODEL_FOR_TOKEN_CLASSIFICATION_MAPPING.keys()),
+                ", ".join(
+                    c.__name__ for c in MODEL_FOR_TOKEN_CLASSIFICATION_MAPPING.keys()),
             )
         )
 
@@ -267,6 +278,7 @@ class NERModel(AutoModelForTokenClassification):
             "Model type should be one of {}.".format(
                 config.__class__,
                 cls.__name__,
-                ", ".join(c.__name__ for c in MODEL_FOR_TOKEN_CLASSIFICATION_MAPPING.keys()),
+                ", ".join(
+                    c.__name__ for c in MODEL_FOR_TOKEN_CLASSIFICATION_MAPPING.keys()),
             )
         )

@@ -55,7 +55,7 @@ def parse_args():
     parser.add_argument(
         "--label_file", default="data/label2ids.json", help="实体标签id", type=str)
     parser.add_argument(
-        "--train_file", default="data/pretrain_train_data.txt", help="训练数据集")
+        "--train_file", default="data/2022京东电商数据比赛/京东商品标题实体识别数据集/train_data/unlabeled_train_data.txt", help="训练数据集")
     parser.add_argument(
         "--val_file", default="data/pretrain_val_data.txt", help="训练数据集")
     arguments = parser.parse_args()
@@ -77,9 +77,9 @@ def main():
     train_loader = DataLoader(train_data, batch_size=args.batch_size,
                               shuffle=True, num_workers=args.num_workers, collate_fn=collate_fn)
 
-    val_data = NerDataset(args.val_file, args)
-    valid_loader = DataLoader(val_data, batch_size=args.batch_size,
-                              shuffle=False, num_workers=args.num_workers, collate_fn=collate_fn)
+    # val_data = NerDataset(args.val_file, args)
+    # valid_loader = DataLoader(val_data, batch_size=args.batch_size,
+    #                           shuffle=False, num_workers=args.num_workers, collate_fn=collate_fn)
 
     args.number_tag = train_data.number_tag
     args.pylen, args.sklen = train_data.pylen, train_data.sklen
@@ -99,10 +99,10 @@ def main():
         model.load_state_dict(torch.load(get_abs_path('checkpoint', f'{model.__class__.__name__}_model.bin'),
                                          map_location=args.hard_device))
     if args.mode == 'train':
-        trainer.fit(model, train_loader, valid_loader)
+        trainer.fit(model, train_loader)
 
-    model.load_state_dict(
-        torch.load(get_abs_path('checkpoint', f'{model.__class__.__name__}_model.bin'), map_location=args.hard_device))
+    # model.load_state_dict(
+    #     torch.load(get_abs_path('checkpoint', f'{model.__class__.__name__}_model.bin'), map_location=args.hard_device))
     # trainer.test(model, test_loader)
 
 

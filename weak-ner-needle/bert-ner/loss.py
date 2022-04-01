@@ -9,6 +9,7 @@ class DiceLoss(nn.Module):
     DiceLoss implemented from 'Dice Loss for Data-imbalanced NLP Tasks'
     Useful in dealing with unbalanced data
     """
+
     def __init__(self):
         super(DiceLoss, self).__init__()
 
@@ -26,6 +27,7 @@ class DiceLoss(nn.Module):
 
 class FocalLoss(nn.Module):
     """Multi-class Focal loss implementation"""
+
     def __init__(self, gamma=2, weight=None, ignore_index=-100):
         super(FocalLoss, self).__init__()
         self.gamma = gamma
@@ -40,7 +42,8 @@ class FocalLoss(nn.Module):
         logpt = F.log_softmax(input, dim=1)
         pt = torch.exp(logpt)
         logpt = (1 - pt)**self.gamma * logpt
-        loss = F.nll_loss(logpt, target, self.weight, ignore_index=self.ignore_index)
+        loss = F.nll_loss(logpt, target, self.weight,
+                          ignore_index=self.ignore_index)
         return loss
 
 

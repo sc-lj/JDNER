@@ -208,8 +208,8 @@ def main(args):
         train_examples, tokenizer, label_map, data_args.max_seq_length, train_examples_wei)
     dev_dataset = NerDataset(dev_examples, tokenizer,
                              label_map, data_args.max_seq_length)
-    test_dataset = NerDataset(test_examples, tokenizer,
-                              label_map, data_args.max_seq_length)
+    # test_dataset = NerDataset(test_examples, tokenizer,
+    #                           label_map, data_args.max_seq_length)
 
     def align_predictions(predictions: np.ndarray, label_ids: np.ndarray) -> Tuple[List[int], List[int]]:
         preds = np.argmax(predictions, axis=2)
@@ -297,21 +297,21 @@ def main(args):
         if trainer.is_world_process_zero():
             tokenizer.save_pretrained(training_args.output_dir)
 
-    if not data_args.no_eval:
-        print("*******************************")
-        print("**********Evaluation***********")
-        print("*******************************")
-        trainer.compute_metrics = lambda x: compute_metrics(x, full=True)
-        test_pred = trainer.predict(test_dataset)
+    # if not data_args.no_eval:
+    #     print("*******************************")
+    #     print("**********Evaluation***********")
+    #     print("*******************************")
+    #     trainer.compute_metrics = lambda x: compute_metrics(x, full=True)
+    #     test_pred = trainer.predict(test_dataset)
 
-        if training_args.do_eval:
-            metric_file_path = os.path.join(
-                model_args.model_name_or_path, data_args.metric_file_path)
-        else:
-            metric_file_path = os.path.join(
-                training_args.output_dir, data_args.metric_file_path)
-        with open(metric_file_path, 'w') as fout:
-            write_metrics(fout, test_pred.metrics["eval_metrics"])
+    #     if training_args.do_eval:
+    #         metric_file_path = os.path.join(
+    #             model_args.model_name_or_path, data_args.metric_file_path)
+    #     else:
+    #         metric_file_path = os.path.join(
+    #             training_args.output_dir, data_args.metric_file_path)
+    #     with open(metric_file_path, 'w') as fout:
+    #         write_metrics(fout, test_pred.metrics["eval_metrics"])
 
     if data_args.do_profile:
         print("*******************************")

@@ -287,9 +287,9 @@ class GlobalPointer(nn.Module):
 
 
 # 搭建网络，就是输入bert获取句子向量特征表示，在用全局指针来获取一个矩阵标注，[batch_size ,class_count ,sentence_length ,sentence_length]
-class JDNerModel(nn.Module):
+class GlobalPointerNerModel(nn.Module):
     def __init__(self, args):
-        super(JDNerModel, self).__init__()
+        super(GlobalPointerNerModel, self).__init__()
         self.args = args
         num_labels = self.args.number_tag
         self.config = BertConfig.from_pretrained(self.args.bert_checkpoint)
@@ -335,12 +335,11 @@ class GlobalPointerNerTrainingModel(pl.LightningModule):
         super().__init__()
         self.args = arguments
         self.save_hyperparameters(arguments)
-        num_labels = self.args.number_tag
         label2id_path = self.args.entity_label_file
         with open(label2id_path, 'r') as f:
             label2ids = json.load(f)
         self.id2label = {v: k for k, v in label2ids.items()}
-        self.model = JDNerModel(arguments)
+        self.model = GlobalPointerNerModel(arguments)
         # torch.save(self.bert.state_dict(), "data/init.pt")
         self.adv = arguments.adv
         if self.adv == "fgm":

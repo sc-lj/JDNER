@@ -14,7 +14,7 @@ import pytorch_lightning as pl
 import os
 import numpy as np
 from collections import defaultdict
-from models import JDNerModel, JDNerTrainingModel, BertModel
+from modelsCRF import JDNerModel, BertModel, CRFNerTrainingModel
 from transformers import BertTokenizer
 from tqdm import tqdm
 import pickle
@@ -25,8 +25,9 @@ args.pylen, args.sklen = 6, 10
 
 
 def tranf():
-    path = "lightning_logs/version_0/checkpoints/epoch=59-f1=0.727-pre=0.714-recall=0.740.ckpt"
-    model = JDNerTrainingModel(args)
+    path = "lightning_logs/version_1/checkpoints/epoch=62-f1=0.7933-pre=0.781-recall=0.806.ckpt"
+    args.number_tag = 105
+    model = CRFNerTrainingModel(args)
 
     model = model.load_from_checkpoint(path,  arguments=args)
 
@@ -62,8 +63,10 @@ def build_entity(tags):
 
 
 def search_text():
+    device = torch.device("cuda")
     bert_model = torch.load("./data/ner_bert_state.pt")
     bert_model.eval()
+    bert_model.to(device)
     with open("data/train.json", 'r') as f:
         data = json.load(f)
     tokenizer = BertTokenizer.from_pretrained(args.bert_checkpoint)
@@ -98,12 +101,13 @@ def search_text():
             input_ids.append(0)
             input_mask.append(0)
         input_ids = torch.tensor([input_ids], dtype=torch.long)
-
+        input_ids = input_ids.to(device)
         input_mask = torch.tensor([input_mask], dtype=torch.float)
+        input_mask = input_mask.to(device)
         with torch.no_grad():
             sequence_out = bert_model(
                 input_ids=input_ids, attention_mask=input_mask)
-
+        sequence_out = sequence_out.cpu()
         for line in label_index[1:-1]:
             label, s, e = line
             label_vec = sequence_out[0][s:e, :]

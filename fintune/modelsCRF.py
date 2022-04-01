@@ -6,7 +6,7 @@
 """
 import os
 import json
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 import torch
 from torch import nn
 import numpy as np
@@ -14,10 +14,13 @@ import pytorch_lightning as pl
 from torch.optim.lr_scheduler import LambdaLR
 from transformers import BertConfig
 from transformers.models.bert.modeling_bert import BertEncoder, BertModel as bertModel, BertPooler, BertOnlyMLMHead, BertEmbeddings as bertEmbeddings
+from transformers.models.roberta.modeling_roberta import RobertaModel
 from transformers.modeling_outputs import BaseModelOutputWithPoolingAndCrossAttentions
 from transformers.modeling_utils import ModuleUtilsMixin
 from torchcrf import CRF
 from AdTraings import PGD, FGM
+from lr_scheduler import CustomDecayLR, BertLR, ReduceLRWDOnPlateau, CosineLRWithRestarts, NoamLR
+from torch.optim.lr_scheduler import CyclicLR, ReduceLROnPlateau
 
 
 class SinusoidalPositionEmbedding(nn.Module):
@@ -89,10 +92,10 @@ class EmbeddingNetwork(nn.Module):
 
 
 class BertEmbeddings(bertEmbeddings):
-    def __init__(self, config):
-        super().__init__(config)
-        self.position_embeddings = SinusoidalPositionEmbedding(
-            output_dim=config.hidden_size)
+    # def __init__(self, config):
+    #     super().__init__(config)
+    #     self.position_embeddings = SinusoidalPositionEmbedding(
+    #         output_dim=config.hidden_size)
 
     def forward(
         self, input_ids=None, token_type_ids=None, position_ids=None, pinyin_embs=None, inputs_embeds=None, past_key_values_length=0
@@ -126,10 +129,10 @@ class BertEmbeddings(bertEmbeddings):
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
 
         embeddings = inputs_embeds + token_type_embeddings
-        # if self.position_embedding_type == "absolute":
-        #     position_embeddings = self.position_embeddings(position_ids)
-        #     embeddings += position_embeddings
-        embeddings = self.position_embeddings(embeddings)
+        if self.position_embedding_type == "absolute":
+            position_embeddings = self.position_embeddings(position_ids)
+            embeddings += position_embeddings
+        # embeddings = self.position_embeddings(embeddings)
         if pinyin_embs is not None:
             embeddings += pinyin_embs
         embeddings = self.LayerNorm(embeddings)
@@ -244,7 +247,9 @@ class JDNerModel(nn.Module):
             sequence_output, _ = self.lstm(sequence_output)
         cls_output = self.cls(sequence_output)
         # crf 训练
-        loss = -self.crf(cls_output, labelids, mask=lmask)
+        loss = 0
+        if labelids is not None:
+            loss = -self.crf(cls_output, labelids, mask=lmask)
         predict_tag = self.crf.decode(cls_output, mask=lmask)
         return predict_tag, loss
 
@@ -275,7 +280,6 @@ class CRFNerTrainingModel(pl.LightningModule):
         super().__init__()
         self.args = arguments
         self.save_hyperparameters(arguments)
-        num_labels = self.args.number_tag
         label2id_path = self.args.label_file
         with open(label2id_path, 'r') as f:
             label2ids = json.load(f)
@@ -338,10 +342,10 @@ class CRFNerTrainingModel(pl.LightningModule):
             scheduler = self.lr_schedulers()
             opt.zero_grad()
 
-        # loss = self.model(input_ids, input_mask,
-        #                     pinyin_ids, stroke_ids, lmask, labelids)
         loss = self.model(input_ids, input_mask,
-                          lmask=lmask, labelids=labelids, max_sen_len=max_sen_len)
+                          lmask=lmask, labelids=labelids,)
+        # loss = self.model(input_ids, input_mask, pinyin_ids=pinyin_ids, stroke_ids=stroke_ids,
+        #                   lmask=lmask, labelids=labelids, max_sen_len=max_sen_len)
         if not self.automatic_optimization:
             self.manual_backward(loss)
             opt.step()
@@ -363,9 +367,10 @@ class CRFNerTrainingModel(pl.LightningModule):
         stroke_ids, lmask, labelids = batch['stroke_ids'], batch['lmask'], batch['labels']
         length = batch['length']
         max_sen_len = max(length)
-        # sequence_output = self.model.decode(input_ids=input_ids, attention_mask=input_mask, py2ids=pinyin_ids, sk2ids=stroke_ids)
-        predict_tag, val_loss = self.model.decode(input_ids, input_mask,
-                                                  lmask=lmask, labelids=labelids, max_sen_len=max_sen_len)
+        predict_tag, val_loss = self.model.decode(
+            input_ids, input_mask, lmask=lmask, labelids=labelids,)
+        # predict_tag, val_loss = self.model.decode(input_ids, input_mask, pinyin_ids=pinyin_ids, stroke_ids=stroke_ids,
+        #                                           lmask=lmask, labelids=labelids, max_sen_len=max_sen_len)
         val_loss = val_loss.cpu().detach().numpy()
         labelids = labelids.cpu().detach().numpy()
         return (labelids, predict_tag, val_loss, length)
@@ -393,6 +398,11 @@ class CRFNerTrainingModel(pl.LightningModule):
         self.log("pre", float(precision), prog_bar=True)
         self.log("recall", float(recall), prog_bar=True)
         self.log("f1", float(f1), prog_bar=True)
+        self.log("val_loss", loss, prog_bar=True)
+        # 主要是用于ReduceLRWDOnPlateau更新学习率的
+        # res = pl.EvalResult(checkpoint_on=loss)
+
+        # return res
 
     def word_metric(self, target, predict, length):
         """字符级指标计算
@@ -428,19 +438,23 @@ class CRFNerTrainingModel(pl.LightningModule):
         gold_number = 0
         pred_number = 0
         correct_num = 0
-
+        each_entity = defaultdict(lambda: defaultdict(int))
         for t, p, l in zip(*(target, predict, length)):
             t = t[:l]
             l_tag = [self.id2label[line] for line in t]
             l_tags = self.build_entity(l_tag)
+            for t, s, e in l_tags:
+                each_entity[t]["glod_num"] += 1
             p = p[:l]
             p_tag = [self.id2label[line] for line in p]
             p_tags = self.build_entity(p_tag)
             pred_number += len(p_tags)
             gold_number += len(l_tags)
             for p_tag, p_start, p_end in p_tags:
+                each_entity[p_tag]["pred_num"] += 1
                 if any([p_tag == t_tag and p_start == t_start and p_end == t_end for t_tag, t_start, t_end in l_tags]):
                     correct_num += 1
+                    each_entity[p_tag]["correct_num"] += 1
         precision = 0
         if pred_number != 0:
             precision = correct_num/pred_number
@@ -448,7 +462,30 @@ class CRFNerTrainingModel(pl.LightningModule):
         f1 = 0
         if precision+recall != 0:
             f1 = 2*precision*recall/(precision+recall)
+        self.show_each_entities(each_entity)
         return precision, recall, f1
+
+    def show_each_entities(self, entities):
+        """_summary_
+
+        Args:
+            entities (_type_): _description_
+        """
+        for lab, values in entities.items():
+            if values['pred_num'] != 0:
+                pre = values["correct_num"]/values['pred_num']
+            else:
+                pre = 0
+            if values['glod_num'] != 0:
+                rec = values["correct_num"]/values['glod_num']
+            else:
+                rec = 0
+            if pre+rec != 0:
+                f1 = 2*pre*rec/(pre+rec)
+            else:
+                f1 = 0
+            print("标签:%3s 数量:%4d 预测数:%4d 准确数:%4d 准确率:%.5f 召回率:%.5f f1:%.5f" %
+                  (lab, values['glod_num'], values['pred_num'], values['correct_num'], pre, rec, f1))
 
     def build_entity(self, tags):
         """构建实体span
@@ -476,13 +513,6 @@ class CRFNerTrainingModel(pl.LightningModule):
             tmp_ent = ""
         return entities
 
-    def test_step(self, batch, batch_idx):
-        return self.validation_step(batch, batch_idx)
-
-    def test_epoch_end(self, outputs) -> None:
-        print('Test.')
-        self.validation_epoch_end(outputs)
-
     def configure_optimizers(self):
         param_optimizer = list(self.named_parameters())
         no_decay = ['bias', "LayerNorm.weight"]
@@ -505,10 +535,16 @@ class CRFNerTrainingModel(pl.LightningModule):
         # optimizer_grouped_parameters = self.parameters()
         optimizer = torch.optim.AdamW(
             optimizer_grouped_parameters, lr=self.args.lr)
-        scheduler = LambdaLR(optimizer,
-                             lr_lambda=lambda step: min((step + 1) ** -0.5,
-                                                        (step + 1) * self.args.warmup_epochs ** (-1.5)),
-                             last_epoch=-1)
+        # scheduler = LambdaLR(optimizer,
+        #                      lr_lambda=lambda step: min((step + 1) ** -0.5,
+        #                                                 (step + 1) * self.args.warmup_epochs ** (-1.5)),
+        #                      last_epoch=-1)
+        scheduler = ReduceLRWDOnPlateau(optimizer, min_lr=1e-9)
+        scheduler = {
+            'scheduler': scheduler,
+            'reduce_on_plateau': True,
+            'monitor': 'val_loss'
+        }
         return [optimizer], [scheduler]
 
     def load_from_transformers_state_dict(self, gen_fp):

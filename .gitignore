@@ -3,3 +3,8 @@ data
 lightning_logs
 __pycache__
 apex
+bio_script
+*.md
+models
+GAIIC*
+LSTM-CRF

@@ -65,8 +65,11 @@ def read_examples_from_file(data_dir, mode):
         data = json.load(f)
 
         for item in data:
-            words = item["str_words"]
-            labels = item["tags"]
+            # words = item["str_words"]
+            # labels = item["tags"]
+            sample = item['sample']
+            words = [line.split("\t")[0] for line in sample]
+            labels = [line.split("\t")[1] for line in sample]
             if "tags_hp" in labels:
                 hp_labels = item["tags_hp"]
             else:
