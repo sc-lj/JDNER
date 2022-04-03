@@ -21,6 +21,7 @@ from torchcrf import CRF
 from AdTraings import PGD, FGM
 from lr_scheduler import CustomDecayLR, BertLR, ReduceLRWDOnPlateau, CosineLRWithRestarts, NoamLR
 from torch.optim.lr_scheduler import CyclicLR, ReduceLROnPlateau
+from crfutils import ConditionalRandomField, allowed_transitions
 
 
 class SinusoidalPositionEmbedding(nn.Module):
@@ -227,9 +228,14 @@ class JDNerModel(nn.Module):
         else:
             linear_hidden = self.config.hidden_size
         self.cls = nn.Linear(linear_hidden, num_labels)
+        self.loss_func = args.loss_func
         self.crf = CRF(num_labels, batch_first=True)
+        self.use_focal_loss = args.use_focal_loss
+        # constraints = allowed_transitions("BIO", args.inversed_label_map)
+        # self.crf_layer = ConditionalRandomField(
+        #     num_labels, constraints)
 
-    def forward(self, input_ids, input_mask, pinyin_ids=None, stroke_ids=None, lmask=None, labelids=None, max_sen_len=512):
+    def forward(self, input_ids, input_mask, pinyin_ids=None, stroke_ids=None, lmask=None, labelids=None, weights=None, max_sen_len=512):
         sequence_output = self.bert(
             input_ids=input_ids, attention_mask=input_mask, py2ids=pinyin_ids, sk2ids=stroke_ids, max_sen_len=max_sen_len)
         if self.add_lstm:
@@ -237,7 +243,38 @@ class JDNerModel(nn.Module):
             sequence_output = sequence_output*input_mask.unsqueeze(-1)
         cls_output = self.cls(sequence_output)
         # crf 训练
-        loss = -self.crf(cls_output, labelids, mask=lmask)
+        loss = self.crf(cls_output, labelids, mask=lmask, reduction="none")
+        if self.use_focal_loss:
+            weight = torch.exp(loss)
+            weight = torch.subtract(torch.tensor(
+                [1.0], device=loss.device), weight)
+            weight = torch.square(weight)
+            loss = torch.multiply(loss, weight)
+        loss = -loss.mean()
+        # predict_mask = (labelids >= 0).to(torch.long)
+        # ones = torch.ones_like(predict_mask.to(torch.long))
+        # idx = torch.cumsum(ones, 1) - 1
+        # idx = idx * predict_mask + 9999 * (1 - predict_mask)
+        # idx = idx.sort()[0]
+        # c_mask = (idx < 9999).to(torch.long)
+        # idx = idx * c_mask
+        # c_logits = cls_output.gather(1, idx[:, :, None].expand_as(cls_output))
+
+        # c_labels = labelids.gather(1, idx)
+        # c_labels = c_labels * c_mask
+        # if self.loss_func == 'nll':
+        #     nll = -self.crf_layer(c_logits, c_labels, c_mask)
+        #     loss = (nll * weights).sum()
+        # elif self.loss_func == 'corrected_nll':
+        #     nll = -self.crf_layer(c_logits, c_labels, c_mask)
+        #     null = -(1 - (-nll).exp()).log()
+        #     if torch.isnan(null).any() or torch.isinf(null).any():
+        #         nl = (1 - (-nll).exp())
+        #         nl = nl + (nl < 1e-4).to(nl).detach() * \
+        #             (1e-4 - nl).detach()
+        #         null = - nl.log()
+
+        #     loss = (nll * weights + null * (1 - weights)).sum()
         return loss
 
     def decode(self, input_ids, input_mask, pinyin_ids=None, stroke_ids=None, lmask=None, labelids=None, max_sen_len=None):
@@ -250,8 +287,11 @@ class JDNerModel(nn.Module):
         loss = 0
         if labelids is not None:
             loss = -self.crf(cls_output, labelids, mask=lmask)
-        predict_tag = self.crf.decode(cls_output, mask=lmask)
-        return predict_tag, loss
+        predict_tag, best_tags_score = self.crf.decode(cls_output, mask=lmask)
+        # if labelids is not None:
+        #     loss = -self.crf_layer(cls_output, labelids, mask=lmask)
+        # predict_tag = self.crf_layer.viterbi_tags(cls_output, lmask)
+        return predict_tag, best_tags_score, loss
 
     def load_from_transformers_state_dict(self, gen_fp):
         """
@@ -284,6 +324,7 @@ class CRFNerTrainingModel(pl.LightningModule):
         with open(label2id_path, 'r') as f:
             label2ids = json.load(f)
         self.id2label = {v: k for k, v in label2ids.items()}
+        arguments.inversed_label_map = self.id2label
         self.model = JDNerModel(arguments)
         # torch.save(self.bert.state_dict(), "data/init.pt")
         self.adv = arguments.adv
@@ -367,7 +408,7 @@ class CRFNerTrainingModel(pl.LightningModule):
         stroke_ids, lmask, labelids = batch['stroke_ids'], batch['lmask'], batch['labels']
         length = batch['length']
         max_sen_len = max(length)
-        predict_tag, val_loss = self.model.decode(
+        predict_tag, best_tags_score, val_loss = self.model.decode(
             input_ids, input_mask, lmask=lmask, labelids=labelids,)
         # predict_tag, val_loss = self.model.decode(input_ids, input_mask, pinyin_ids=pinyin_ids, stroke_ids=stroke_ids,
         #                                           lmask=lmask, labelids=labelids, max_sen_len=max_sen_len)
@@ -535,16 +576,16 @@ class CRFNerTrainingModel(pl.LightningModule):
         # optimizer_grouped_parameters = self.parameters()
         optimizer = torch.optim.AdamW(
             optimizer_grouped_parameters, lr=self.args.lr)
-        # scheduler = LambdaLR(optimizer,
-        #                      lr_lambda=lambda step: min((step + 1) ** -0.5,
-        #                                                 (step + 1) * self.args.warmup_epochs ** (-1.5)),
-        #                      last_epoch=-1)
-        scheduler = ReduceLRWDOnPlateau(optimizer, min_lr=1e-9)
-        scheduler = {
-            'scheduler': scheduler,
-            'reduce_on_plateau': True,
-            'monitor': 'val_loss'
-        }
+        scheduler = LambdaLR(optimizer,
+                             lr_lambda=lambda step: min((step + 1) ** -0.5,
+                                                        (step + 1) * self.args.warmup_epochs ** (-1.5)),
+                             last_epoch=-1)
+        # scheduler = ReduceLRWDOnPlateau(optimizer, min_lr=1e-9)
+        # scheduler = {
+        #     'scheduler': scheduler,
+        #     'reduce_on_plateau': True,
+        #     'monitor': 'val_loss'
+        # }
         return [optimizer], [scheduler]
 
     def load_from_transformers_state_dict(self, gen_fp):

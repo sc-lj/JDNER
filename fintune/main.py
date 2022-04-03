@@ -37,7 +37,7 @@ def parse_args():
     parser.add_argument("--load_checkpoint", default=True,
                         help="是否加载训练保存的权重, one of [t,f]")
     parser.add_argument(
-        '--bert_checkpoint', default='/mnt/disk2/PythonProgram/NLPCode/PretrainModel/chinese_bert_base', type=str)
+        '--bert_checkpoint', default='models/checkpoints/checkpoint-49998', type=str)
     parser.add_argument('--model_save_path', default='checkpoint', type=str)
     parser.add_argument('--epochs', default=100, type=int, help='训练轮数')
     parser.add_argument('--batch_size', default=50, type=int, help='批大小')
@@ -77,6 +77,12 @@ def parse_args():
         "--val_file", default="data/val_corrected.json", help="验证集")
     parser.add_argument(
         "--entity_path", default="data/entites.json", help="实体数据集")
+    parser.add_argument(
+        "--loss_func", default="corrected_nll", help="采用的loss func场景")
+    parser.add_argument(
+        "--use_focal_loss", default=True, help="采用的loss func场景")
+    parser.add_argument(
+        "--weak_label_file", default="data/2022京东电商数据比赛/京东商品标题实体识别数据集/train_data/weak_label_data.json", help="弱标签数据")
     arguments = parser.parse_args()
     # if arguments.hard_device == 'cpu':
     #     arguments.device = torch.device(arguments.hard_device)

@@ -178,7 +178,7 @@ def parse_args():
     parser.add_argument('--adv', default=None,
                         choices=[None, "fgm", "pgd"], help='对抗学习模块')
     parser.add_argument('--epsilon', default=0.5, type=float, help='对抗学习的噪声系数')
-    parser.add_argument('--model_type', default="global", choices=["global", 'global'],
+    parser.add_argument('--model_type', default="crf", choices=["crf", 'global'],
                         type=str, help='损失函数类型')
     parser.add_argument('--lr', default=1e-5, type=float, help='学习率')
     parser.add_argument('--no_bert_lr', default=1e-3,
@@ -201,6 +201,10 @@ def parse_args():
         "--val_file", default="data/val.json", help="验证集")
     parser.add_argument(
         "--entity_path", default="data/entites.json", help="实体数据集")
+    parser.add_argument(
+        "--loss_func", default="corrected_nll", help="采用的loss func场景")
+    parser.add_argument(
+        "--use_focal_loss", default=True, help="采用的loss func场景")
     arguments = parser.parse_args()
     return arguments
 
@@ -266,8 +270,10 @@ def predict_crf():
     id2label = {v: k for k, v in label2ids.items()}
     args.number_tag = len(label2ids)
     space_char = "[unused1]"
-    args.val_file = "data/2022京东电商数据比赛/京东商品标题实体识别数据集/preliminary_test_a/sample_per_line_preliminary_A.txt"
-    # args.val_file = "data/2022京东电商数据比赛/京东商品标题实体识别数据集/train_data/unlabeled_train_data.txt"
+    # args.val_file = "data/2022京东电商数据比赛/京东商品标题实体识别数据集/preliminary_test_a/sample_per_line_preliminary_A.txt"
+    args.val_file = "data/2022京东电商数据比赛/京东商品标题实体识别数据集/train_data/unlabeled_train_data.txt"
+    # args.val_file = "data/train.txt"
+    # args.val_file = "data/val.txt"
 
     val_data = NerDataset(args)
     valid_loader = DataLoader(val_data, batch_size=args.batch_size,
@@ -276,11 +282,11 @@ def predict_crf():
     device = torch.device("cuda")
     model = JDNerModel(args)
     model_static = torch.load(
-        "lightning_logs/version_1/checkpoints/crfner_model.pt")
+        "lightning_logs/version_5/checkpoints/crfner_model.pt")
     model.load_state_dict(model_static)
     model.eval()
     model.to(device)
-    keywords_entities = init_keywords_entiteis()
+    keywords_entities, all_keywords_entities = init_keywords_entiteis()
     token_tags = []
     for batch in tqdm(valid_loader):
         input_ids = batch['input_ids']
@@ -297,26 +303,44 @@ def predict_crf():
         stroke_ids = stroke_ids.to(device)
         lmasks = lmasks.to(device)
         with torch.no_grad():
-            predict, _ = model.decode(input_ids, input_masks, lmask=lmasks,
-                                      max_sen_len=max_sen_len)
-        for pred, tok, leng in zip(*(predict, token, length)):
+            predict, best_tags_score, _ = model.decode(input_ids, input_masks, lmask=lmasks,
+                                                       max_sen_len=max_sen_len)
+        for pred, score, tok, leng in zip(*(predict, best_tags_score, token, length)):
             p_tag = [id2label[l] for l in pred[:leng]]
-            tok_tag = list(zip(*(tok, p_tag)))
-            tok_tag = [" ".join(t) for t in tok_tag]
+            score = [round(s, 3) for s in score]
+            tok_tag = list(zip(*(tok, p_tag, score)))
+            tok_tag = [" ".join(map(str, t)) for t in tok_tag]
             tok_tag = tok_tag[1:-1]
+            line = map_dict_label_O(tok_tag, keywords_entities)
             token_tags.append(tok_tag)
-    # with open("data/2022京东电商数据比赛/京东商品标题实体识别数据集/train_data/unlabeled_train_data_predict.txt", "w") as f:
+
+    # with open("data/2022京东电商数据比赛/京东商品标题实体识别数据集/preliminary_test_a/crf_predict_v1.txt", "w") as f:
     #     for line in token_tags:
     #         line = map_dict_label_O(line, keywords_entities)
-    #         f.write("\t".join(line)+"\n")
+    #         for l in line:
+    #             l = l.replace(space_char, " ")
+    #             f.write(l+"\n")
+    #         f.write("\n")
 
-    with open("data/2022京东电商数据比赛/京东商品标题实体识别数据集/preliminary_test_a/crf_predict_v1.txt", "w") as f:
+    with open("data/2022京东电商数据比赛/京东商品标题实体识别数据集/train_data/unlabeled_train_data_predict.txt", "w") as f:
         for line in token_tags:
             line = map_dict_label_O(line, keywords_entities)
-            for l in line:
-                l = l.replace(space_char, " ")
-                f.write(l+"\n")
-            f.write("\n")
+            # line = map_dict_label(line, keywords_entities,
+            #                       all_keywords_entities)
+            f.write("\n".join(line)+"\n")
+            f.write(""+"\n")
+
+    # with open("data/train_predict.txt", "w") as f:
+    #     for line in token_tags:
+    #         # line = map_dict_label_O(line, keywords_entities)
+    #         f.write("\n".join(line)+"\n")
+    #         f.write("\n")
+
+    # with open("data/val_predict.txt", "w") as f:
+    #     for line in token_tags:
+    #         # line = map_dict_label_O(line, keywords_entities)
+    #         f.write("\n".join(line)+"\n")
+    #         f.write(""+"\n")
 
 
 def init_keywords_entiteis():
@@ -327,18 +351,21 @@ def init_keywords_entiteis():
     """
     with open("data/strong_entites.json", 'r') as f:
         data = json.load(f)
-
-    keywords_entities = {}
-    for lab, entities in data.items():
-        keywords = KeywordProcessor()
-        keywords.non_word_boundaries = set()
-        keywords.add_keywords_from_list(list(entities))
-        keywords_entities[lab] = keywords
-    return keywords_entities
+    keywords = KeywordProcessor()
+    keywords._white_space_chars = []
+    keywords.non_word_boundaries = set()
+    keywords.add_keywords_from_dict(data)
+    with open("data/weak_strong_entites.json", 'r') as f:
+        data = json.load(f)
+    all_keywords = KeywordProcessor()
+    all_keywords.non_word_boundaries = set()
+    all_keywords._white_space_chars = []
+    all_keywords.add_keywords_from_dict(data)
+    return keywords, all_keywords
 
 
 def get_mul_label_info(text, keywords_entities):
-    """获取每个标签的标注的信息
+    """获取每个标签下实体字符硬匹配的标注的信息
 
     Args:
         line (_type_): _description_
@@ -374,37 +401,122 @@ def overlap_label_info(O_label):
     """
     # 如果start相同，过滤短的
     other_label = []
-    for lab, word, start, end in O_label:
+    for lab, start, end in O_label:
         if len(other_label) == 0:
-            other_label.append([lab, word, start, end])
+            other_label.append([lab, start, end])
             continue
         # 开始索引相同，结束索引不同，取结束索引最大的
-        if other_label[-1][2] == start and other_label[-1][3] < end:
-            other_label[-1] = [lab, word, start, end]
+        if other_label[-1][1] == start and other_label[-1][2] < end:
+            other_label[-1] = [lab, start, end]
             continue
         # 开始索引不同，end索引相同，保留开始索引最小的
-        if other_label[-1][2] < start and other_label[-1][3] == end:
+        if other_label[-1][1] < start and other_label[-1][2] == end:
             continue
         # 两个实体匹配刚好交叉，取第一个
-        if other_label[-1][2] < start < other_label[-1][3] < end:
+        if other_label[-1][1] < start < other_label[-1][2] < end:
             continue
         # 如果有歧义，两者都不要
-        if other_label[-1][2] == start and other_label[-1][3] == end:
+        if other_label[-1][1] == start and other_label[-1][2] == end:
             del other_label[-1]
             continue
-        if other_label[-1][2] < start and end < other_label[-1][3]:
+        if other_label[-1][1] < start and end < other_label[-1][2]:
             continue
-        other_label.append([lab, word, start, end])
+        other_label.append([lab,  start, end])
 
     return other_label
 
 
-def map_dict_label_O(line, entities):
+def map_dict_label(line, keywords_entities, all_keywords_entities):
+    """用字典去匹配,如果与算法冲突，以字典为主
+
+    Args:
+        words (_type_): _description_
+        keywords_entities (_type_): _description_
+    """
+    space_char = "[unused1]"
+    text = [l.split(" ")[0] for l in line]
+    text = "".join(text)
+    text = text.replace(space_char, " ")
+    tags = [l.split(" ")[1] for l in line]
+    tag_index = build_entity(tags)
+    # for lin in tag_index:
+    #     lin.append("t")
+    map_index = keywords_entities.extract_keywords(text, span_info=True)
+    # for lin in map_index:
+    #     lin.append("m")
+
+    new_index = []
+    for lin in map_index:
+        l, s, e = lin
+        temp = []
+        for t_lin in tag_index:
+            t_l, l_s, l_e = t_lin
+            if l_e <= s:
+                new_index.append(t_lin)
+            elif l_s >= e:
+                break
+            else:
+                temp.append(t_lin)
+        if len(temp):
+            new_temp = []
+            label, start, end = l, s, e
+            for t_lin in temp:
+                t_l, l_s, l_e = t_lin
+                if l_s < s < l_e:
+                    if s-l_s >= 2:
+                        info = all_keywords_entities.extract_keywords(
+                            text[l_s:s], span_info=True)
+                        if len(info) != 0:
+                            lab, st, en = info[0]
+                            st, en = l_s+st, l_s+en
+                            new_temp.append([lab, st, en])
+
+                elif s <= l_s < l_e <= e:
+                    pass
+                elif l_s < e < l_e:
+                    if l_e-e >= 2:
+                        info = all_keywords_entities.extract_keywords(
+                            text[e:l_e], span_info=True)
+                        if len(info) != 0:
+                            lab, st, en = info[0]
+                            st, en = e+st, e+en
+                            new_temp.append([lab, st, en])
+                else:
+                    print()
+            new_temp.append([label, start, end])
+            new_temp = sorted(new_temp, key=lambda x: x[1])
+            new_index.extend(new_temp)
+    line = expand_text(new_index, text)
+    return line
+
+
+def expand_text(index, text):
+    """_summary_
+
+    Args:
+        index (_type_): _description_
+        text (_type_): _description_
+    """
+    s = 0
+    text_tag = []
+    for lab, start, end in index:
+        if start > s:
+            text_tag.extend([" ".join((t, "O")) for t in text[s:start]])
+        text_tag.extend([" ".join((t, "B-"+lab)) if i == 0 else " ".join((t, "I-"+lab))
+                        for i, t in enumerate(text[start:lab])])
+        s = end
+
+    if s < len(text):
+        text_tag.extend([" ".join((t, "O")) for t in text[s:]])
+    return text_tag
+
+
+def map_dict_label_O(line, keywords_entities):
     """用字典去匹配连续为O的字符
 
     Args:
         words (_type_): _description_
-        entities (_type_): _description_
+        keywords_entities (_type_): _description_
     """
     space_char = "[unused1]"
     text = [l.split(" ")[0] for l in line]
@@ -418,18 +530,14 @@ def map_dict_label_O(line, entities):
         O_text = text[start:end]
         if len(O_text) < 2:
             continue
-        map_result = get_mul_label_info(O_text, entities)
-        map_result = [l for l in map_result if len(l[1]) > 2]
+        map_result = keywords_entities.extract_keywords(O_text, span_info=True)
         if len(map_result) == 0:
             continue
-        other_label = sorted(map_result, key=lambda x: (x[2], x[3]))
+        map_result = [l for l in map_result if (l[2]-l[1]) >= 2]
 
-        other_label = overlap_label_info(other_label)
-        print(other_label)
-        for lab, word, start1, end1 in other_label:
-            if len(word) <= 2:
-                continue
-            labs = ["B-"+lab if i == 0 else "I-"+lab for i in range(len(word))]
+        for lab, start1, end1 in map_result:
+            sub = end1-start1
+            labs = ["B-"+lab if i == 0 else "I-"+lab for i in range(sub)]
             line[start+start1:start+end1] = [" ".join((lin.split(" ")[0], labs[i]))
                                              for i, lin in enumerate(line[start+start1:start+end1])]
     return line
@@ -528,7 +636,7 @@ def tranf_model_to_static():
         entity2ids = json.load(f)
 
     if args.model_type == "crf":
-        ckpt_file = "lightning_logs/version_1/checkpoints/epoch=62-f1=0.7933-pre=0.781-recall=0.806.ckpt"
+        ckpt_file = "lightning_logs/version_5/checkpoints/epoch=14-f1=0.7960-pre=0.785-recall=0.807.ckpt"
         ckpt_path = os.path.dirname(ckpt_file)
         from modelsCRF import CRFNerTrainingModel
         number_tag = len(label2ids)

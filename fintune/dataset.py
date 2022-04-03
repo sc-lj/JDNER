@@ -44,6 +44,9 @@ class NerDataset(Dataset):
             self.number_tag = len(self.label2ids)
         else:
             self.number_tag = len(self.entity2ids)
+        if self.is_train:
+            with open(args.weak_label_file, 'r') as f:
+                self.weak_data = json.load(f)
         self.tokenizer = BertTokenizer.from_pretrained(args.bert_checkpoint)
 
         self.pytool = PinyinTool(
@@ -78,8 +81,8 @@ class NerDataset(Dataset):
         if len(tokens) > self.max_sen_len - 2:
             tokens = tokens[0:(self.max_sen_len - 2)]
             labels = labels[0:(self.max_sen_len - 2)]
-        if self.is_train and random.random() < 0.5:
-            tokens, labels = self.EDA(tokens, labels)
+        # if self.is_train and random.random() < 0.5:
+        #     tokens, labels = self.EDA(tokens, labels)
 
         _tokens = []
         _labels = []
