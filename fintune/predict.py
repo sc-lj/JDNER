@@ -311,7 +311,6 @@ def predict_crf():
             tok_tag = list(zip(*(tok, p_tag, score)))
             tok_tag = [" ".join(map(str, t)) for t in tok_tag]
             tok_tag = tok_tag[1:-1]
-            line = map_dict_label_O(tok_tag, keywords_entities)
             token_tags.append(tok_tag)
 
     # with open("data/2022京东电商数据比赛/京东商品标题实体识别数据集/preliminary_test_a/crf_predict_v1.txt", "w") as f:
@@ -324,7 +323,7 @@ def predict_crf():
 
     with open("data/2022京东电商数据比赛/京东商品标题实体识别数据集/train_data/unlabeled_train_data_predict.txt", "w") as f:
         for line in token_tags:
-            line = map_dict_label_O(line, keywords_entities)
+            # line = map_dict_label_O(line, keywords_entities)
             # line = map_dict_label(line, keywords_entities,
             #                       all_keywords_entities)
             f.write("\n".join(line)+"\n")
@@ -503,7 +502,7 @@ def expand_text(index, text):
         if start > s:
             text_tag.extend([" ".join((t, "O")) for t in text[s:start]])
         text_tag.extend([" ".join((t, "B-"+lab)) if i == 0 else " ".join((t, "I-"+lab))
-                        for i, t in enumerate(text[start:lab])])
+                        for i, t in enumerate(text[start:end])])
         s = end
 
     if s < len(text):

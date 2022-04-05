@@ -44,9 +44,10 @@ class NerDataset(Dataset):
             self.number_tag = len(self.label2ids)
         else:
             self.number_tag = len(self.entity2ids)
-        if self.is_train:
+        if self.is_train and args.weak_label_file is not None:
             with open(args.weak_label_file, 'r') as f:
-                self.weak_data = json.load(f)
+                weak_data = json.load(f)
+            self.data = self.data+weak_data
         self.tokenizer = BertTokenizer.from_pretrained(args.bert_checkpoint)
 
         self.pytool = PinyinTool(
@@ -83,7 +84,7 @@ class NerDataset(Dataset):
             labels = labels[0:(self.max_sen_len - 2)]
         # if self.is_train and random.random() < 0.5:
         #     tokens, labels = self.EDA(tokens, labels)
-
+        weight = float(data.get("weight", 1))
         _tokens = []
         _labels = []
         _lmask = []
@@ -131,7 +132,8 @@ class NerDataset(Dataset):
             pointer_label[self.entity2ids[lab], start, end] = 1
         _labels = [self.label2ids[l] for l in _labels]
         return {"input_ids": input_ids, "length": length, "input_mask": input_mask, "pinyin_ids": pinyin_ids, "stroke_ids": stroke_ids,
-                "labels": _labels, "pointer_label": pointer_label, "lmask": _lmask, "pylen": self.pylen, "sklen": self.sklen, "labelOid": self.label2ids["O"]}
+                "labels": _labels, "pointer_label": pointer_label, "lmask": _lmask, "pylen": self.pylen, "sklen": self.sklen, "weight": weight,
+                "labelOid": self.label2ids["O"]}
 
     def get_zi_py_matrix(self):
         pysize = 430
@@ -248,8 +250,10 @@ def collate_fn(batches):
     pointer_labels = []
     lmasks = []
     lengthes = []
+    weights = []
     for batch in batches:
         length = batch['length']
+        weights.append(batch['weight'])
         pylen = batch["pylen"]
         sklen = batch['sklen']
         labelOid = batch["labelOid"]
@@ -283,6 +287,7 @@ def collate_fn(batches):
     lmasks = lmasks.type(torch.ByteTensor)
     pointer_labels = torch.from_numpy(
         np.stack(pointer_labels)).type(torch.long)
+    weights = torch.tensor(weights, dtype=torch.float32)
 
     return {"input_ids": input_ids, "length": lengthes, "input_mask": input_masks, "pinyin_ids": pinyin_ids, "stroke_ids": stroke_ids,
-            "labels": labels, "lmask": lmasks, "pointer_labels": pointer_labels}
+            "labels": labels, "lmask": lmasks, "pointer_labels": pointer_labels, "weights": weights}

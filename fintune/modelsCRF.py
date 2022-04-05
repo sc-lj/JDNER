@@ -22,6 +22,9 @@ from AdTraings import PGD, FGM
 from lr_scheduler import CustomDecayLR, BertLR, ReduceLRWDOnPlateau, CosineLRWithRestarts, NoamLR
 from torch.optim.lr_scheduler import CyclicLR, ReduceLROnPlateau
 from crfutils import ConditionalRandomField, allowed_transitions
+from transformers import BertTokenizer, WEIGHTS_NAME
+from models_nezha.modeling_nezha import NeZhaModel
+from models_nezha.configuration_nezha import NeZhaConfig
 
 
 class SinusoidalPositionEmbedding(nn.Module):
@@ -206,15 +209,20 @@ class BertModel(bertModel):
             head_mask=head_mask
         )
         sequence_output = encoder_outputs[0]
-        return sequence_output
+        return sequence_output, encoder_outputs[1:]
 
 
 class JDNerModel(nn.Module):
     def __init__(self, args) -> None:
         super().__init__()
         self.args = args
-        self.config = BertConfig.from_pretrained(self.args.bert_checkpoint)
-        self.bert = BertModel(self.config, args)
+        if args.backbone == "bert":
+            self.config = BertConfig.from_pretrained(self.args.bert_checkpoint)
+            self.bert = BertModel(self.config, args)
+        else:
+            self.config = NeZhaConfig.from_pretrained(
+                self.args.bert_checkpoint)
+            self.bert = NeZhaModel(self.config)
         # self.bert = BertModel.from_pretrained(
         # self.args.bert_checkpoint, args=args)
         num_labels = self.args.number_tag
@@ -228,33 +236,25 @@ class JDNerModel(nn.Module):
         else:
             linear_hidden = self.config.hidden_size
         self.cls = nn.Linear(linear_hidden, num_labels)
+        self.use_focal_loss = args.use_focal_loss
         self.loss_func = args.loss_func
         self.crf = CRF(num_labels, batch_first=True)
-        self.use_focal_loss = args.use_focal_loss
+
         # constraints = allowed_transitions("BIO", args.inversed_label_map)
-        # self.crf_layer = ConditionalRandomField(
-        #     num_labels, constraints)
+        # self.crf = ConditionalRandomField(num_labels, constraints)
 
     def forward(self, input_ids, input_mask, pinyin_ids=None, stroke_ids=None, lmask=None, labelids=None, weights=None, max_sen_len=512):
         sequence_output = self.bert(
-            input_ids=input_ids, attention_mask=input_mask, py2ids=pinyin_ids, sk2ids=stroke_ids, max_sen_len=max_sen_len)
+            input_ids=input_ids, attention_mask=input_mask, py2ids=pinyin_ids, sk2ids=stroke_ids, max_sen_len=max_sen_len)[0]
         if self.add_lstm:
             sequence_output, _ = self.lstm(sequence_output)
             sequence_output = sequence_output*input_mask.unsqueeze(-1)
         cls_output = self.cls(sequence_output)
         # crf 训练
-        loss = self.crf(cls_output, labelids, mask=lmask, reduction="none")
-        if self.use_focal_loss:
-            weight = torch.exp(loss)
-            weight = torch.subtract(torch.tensor(
-                [1.0], device=loss.device), weight)
-            weight = torch.square(weight)
-            loss = torch.multiply(loss, weight)
-        loss = -loss.mean()
-        # predict_mask = (labelids >= 0).to(torch.long)
-        # ones = torch.ones_like(predict_mask.to(torch.long))
+
+        # ones = torch.ones_like(lmask.to(torch.long))
         # idx = torch.cumsum(ones, 1) - 1
-        # idx = idx * predict_mask + 9999 * (1 - predict_mask)
+        # idx = idx * lmask + 9999 * (1 - lmask)
         # idx = idx.sort()[0]
         # c_mask = (idx < 9999).to(torch.long)
         # idx = idx * c_mask
@@ -262,35 +262,51 @@ class JDNerModel(nn.Module):
 
         # c_labels = labelids.gather(1, idx)
         # c_labels = c_labels * c_mask
-        # if self.loss_func == 'nll':
-        #     nll = -self.crf_layer(c_logits, c_labels, c_mask)
-        #     loss = (nll * weights).sum()
-        # elif self.loss_func == 'corrected_nll':
-        #     nll = -self.crf_layer(c_logits, c_labels, c_mask)
-        #     null = -(1 - (-nll).exp()).log()
-        #     if torch.isnan(null).any() or torch.isinf(null).any():
-        #         nl = (1 - (-nll).exp())
-        #         nl = nl + (nl < 1e-4).to(nl).detach() * \
-        #             (1e-4 - nl).detach()
-        #         null = - nl.log()
+        if self.loss_func == 'nll':
+            # nll = -self.crf(c_logits, c_labels, c_mask)
+            nll = -self.crf(cls_output, labelids,
+                            mask=lmask, reduction="none")
+            loss = (nll * weights)
+        elif self.loss_func == 'corrected_nll':
+            # nll = -self.crf(c_logits, c_labels, c_mask)
+            nll = -self.crf(cls_output, labelids,
+                            mask=lmask, reduction="none")
+            null = -(1 - (-nll).exp()).log()
+            if torch.isnan(null).any() or torch.isinf(null).any():
+                nl = (1 - (-nll).exp())
+                nl = nl + (nl < 1e-4).to(nl).detach() * \
+                    (1e-4 - nl).detach()
+                null = - nl.log()
 
-        #     loss = (nll * weights + null * (1 - weights)).sum()
+            loss = (nll * weights + null * (1 - weights))
+        if self.use_focal_loss:
+            weight = torch.exp(-loss)
+            weight = torch.subtract(torch.tensor(
+                [1.0], device=loss.device), weight)
+            weight = torch.square(weight)
+            loss = torch.multiply(loss, weight)
+        loss = loss.sum()
         return loss
 
-    def decode(self, input_ids, input_mask, pinyin_ids=None, stroke_ids=None, lmask=None, labelids=None, max_sen_len=None):
+    def decode(self, input_ids, input_mask, pinyin_ids=None, stroke_ids=None, lmask=None, labelids=None, weights=None, max_sen_len=None):
         sequence_output = self.bert(
-            input_ids=input_ids, attention_mask=input_mask, py2ids=pinyin_ids, sk2ids=stroke_ids, max_sen_len=max_sen_len)
+            input_ids=input_ids, attention_mask=input_mask, py2ids=pinyin_ids, sk2ids=stroke_ids, max_sen_len=max_sen_len)[0]
         if self.add_lstm:
             sequence_output, _ = self.lstm(sequence_output)
         cls_output = self.cls(sequence_output)
         # crf 训练
         loss = 0
+        best_tags_score = []
         if labelids is not None:
             loss = -self.crf(cls_output, labelids, mask=lmask)
         predict_tag, best_tags_score = self.crf.decode(cls_output, mask=lmask)
+
         # if labelids is not None:
-        #     loss = -self.crf_layer(cls_output, labelids, mask=lmask)
-        # predict_tag = self.crf_layer.viterbi_tags(cls_output, lmask)
+        #     loss = -self.crf(cls_output, labelids, mask=lmask)
+        # predict_tag = self.crf.viterbi_tags(cls_output, lmask)
+        # best_tags_score = [l[1] for l in predict_tag]
+        # predict_tag = [l[0] for l in predict_tag]
+
         return predict_tag, best_tags_score, loss
 
     def load_from_transformers_state_dict(self, gen_fp):
@@ -336,22 +352,22 @@ class CRFNerTrainingModel(pl.LightningModule):
             self.adv_model = PGD(self.model)
             self.automatic_optimization = False
 
-    def forward(self, input_ids, input_mask, pinyin_ids=None, stroke_ids=None, lmask=None, labelids=None, max_sen_len=512):
+    def forward(self, input_ids, input_mask, pinyin_ids=None, stroke_ids=None, lmask=None, labelids=None, weights=None, max_sen_len=512):
         loss = self.model(input_ids, input_mask, pinyin_ids,
-                          stroke_ids, lmask, labelids, max_sen_len)
+                          stroke_ids, lmask, labelids, weights, max_sen_len)
         return loss
 
-    def adv_fgm_model(self, fgm_model, input_ids, input_mask, pinyin_ids=None, stroke_ids=None, lmask=None, labelids=None, max_sen_len=512):
+    def adv_fgm_model(self, fgm_model, input_ids, input_mask, pinyin_ids=None, stroke_ids=None, lmask=None, labelids=None, weights=None, max_sen_len=512):
         # 对抗训练
         fgm_model.attack(epsilon=self.args.epsilon)  # 在embedding上添加对抗扰动
         # crf 训练
         loss_adv = self.model(input_ids, input_mask, pinyin_ids,
-                              stroke_ids, lmask, labelids, max_sen_len)
+                              stroke_ids, lmask, labelids, weights, max_sen_len)
         self.manual_backward(loss_adv)
         fgm_model.restore()
         return loss_adv.item()
 
-    def adv_pgd_model(self, pgd_model, input_ids, input_mask, pinyin_ids=None, stroke_ids=None, lmask=None, labelids=None, max_sen_len=512):
+    def adv_pgd_model(self, pgd_model, input_ids, input_mask, pinyin_ids=None, stroke_ids=None, lmask=None, labelids=None, weights=None, max_sen_len=512):
         pgd_model.backup_grad()
         K = self.args.pgd_K
         # 对抗训练
@@ -367,7 +383,7 @@ class CRFNerTrainingModel(pl.LightningModule):
 
             # crf 训练
             loss_adv = self.model(input_ids, input_mask, pinyin_ids,
-                                  stroke_ids, lmask, labelids, max_sen_len)
+                                  stroke_ids, lmask, labelids, weights, max_sen_len)
             self.manual_backward(loss_adv)  # 反向传播，并在正常的grad基础上，累加对抗训练的梯度
             loss_advs.append(loss_adv.item())
         pgd_model.restore()  #
@@ -376,7 +392,7 @@ class CRFNerTrainingModel(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         input_ids, input_mask, pinyin_ids = batch['input_ids'], batch['input_mask'], batch['pinyin_ids']
         stroke_ids, lmask, labelids = batch['stroke_ids'], batch['lmask'], batch['labels']
-        length = batch['length']
+        length, weights = batch['length'], batch['weights']
         max_sen_len = max(length)
         if not self.automatic_optimization:
             opt = self.optimizers()
@@ -384,7 +400,7 @@ class CRFNerTrainingModel(pl.LightningModule):
             opt.zero_grad()
 
         loss = self.model(input_ids, input_mask,
-                          lmask=lmask, labelids=labelids,)
+                          lmask=lmask, labelids=labelids, weights=weights)
         # loss = self.model(input_ids, input_mask, pinyin_ids=pinyin_ids, stroke_ids=stroke_ids,
         #                   lmask=lmask, labelids=labelids, max_sen_len=max_sen_len)
         if not self.automatic_optimization:
@@ -393,10 +409,10 @@ class CRFNerTrainingModel(pl.LightningModule):
             scheduler.step()
         if self.adv == "fgm":
             self.adv_loss = self.adv_fgm_model(self.adv_model, input_ids, input_mask,
-                                               lmask=lmask, labelids=labelids, max_sen_len=max_sen_len)
+                                               lmask=lmask, labelids=labelids, weights=weights, max_sen_len=max_sen_len)
         elif self.adv == 'pgd':
             self.adv_loss = self.adv_pgd_model(self.adv_model, input_ids, input_mask,
-                                               lmask=lmask, labelids=labelids, max_sen_len=max_sen_len)
+                                               lmask=lmask, labelids=labelids, weights=weights, max_sen_len=max_sen_len)
         return loss
 
     def training_step_end(self, loss):
@@ -406,10 +422,10 @@ class CRFNerTrainingModel(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         input_ids, input_mask, pinyin_ids = batch['input_ids'], batch['input_mask'], batch['pinyin_ids']
         stroke_ids, lmask, labelids = batch['stroke_ids'], batch['lmask'], batch['labels']
-        length = batch['length']
+        length, weights = batch['length'], batch['weights']
         max_sen_len = max(length)
         predict_tag, best_tags_score, val_loss = self.model.decode(
-            input_ids, input_mask, lmask=lmask, labelids=labelids,)
+            input_ids, input_mask, lmask=lmask, weights=weights, labelids=labelids)
         # predict_tag, val_loss = self.model.decode(input_ids, input_mask, pinyin_ids=pinyin_ids, stroke_ids=stroke_ids,
         #                                           lmask=lmask, labelids=labelids, max_sen_len=max_sen_len)
         val_loss = val_loss.cpu().detach().numpy()

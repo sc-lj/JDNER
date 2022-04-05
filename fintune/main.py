@@ -15,6 +15,9 @@ from modelsCRF import CRFNerTrainingModel
 from GlobalPointerModel import GlobalPointerNerTrainingModel
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.callbacks.stochastic_weight_avg import StochasticWeightAveraging
+from pytorch_lightning.utilities.seed import seed_everything
+
+seed_everything(2023)
 
 
 def str2bool(v):
@@ -38,6 +41,10 @@ def parse_args():
                         help="是否加载训练保存的权重, one of [t,f]")
     parser.add_argument(
         '--bert_checkpoint', default='models/checkpoints/checkpoint-49998', type=str)
+    # parser.add_argument(
+    #     '--bert_checkpoint', default='/mnt/disk2/PythonProgram/NLPCode/PretrainModel/NEZHA-Base/nezha-base-www', type=str)
+    parser.add_argument(
+        '--backbone', default='bert', type=str)
     parser.add_argument('--model_save_path', default='checkpoint', type=str)
     parser.add_argument('--epochs', default=100, type=int, help='训练轮数')
     parser.add_argument('--batch_size', default=50, type=int, help='批大小')
@@ -78,11 +85,13 @@ def parse_args():
     parser.add_argument(
         "--entity_path", default="data/entites.json", help="实体数据集")
     parser.add_argument(
-        "--loss_func", default="corrected_nll", help="采用的loss func场景")
+        "--loss_func", default="nll", help="采用的loss func场景")
     parser.add_argument(
-        "--use_focal_loss", default=True, help="采用的loss func场景")
+        "--use_focal_loss", default=False, help="采用的loss func场景")
     parser.add_argument(
         "--weak_label_file", default="data/2022京东电商数据比赛/京东商品标题实体识别数据集/train_data/weak_label_data.json", help="弱标签数据")
+    # parser.add_argument(
+    #     "--weak_label_file", default=None, help="弱标签数据")
     arguments = parser.parse_args()
     # if arguments.hard_device == 'cpu':
     #     arguments.device = torch.device(arguments.hard_device)
