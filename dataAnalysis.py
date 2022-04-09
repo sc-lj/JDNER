@@ -8,11 +8,13 @@
 @Desc    :   None
 '''
 
+from cmath import inf
 from flashtext import KeywordProcessor
 import json
 from collections import defaultdict
 from pypinyin import pinyin, Style, lazy_pinyin
 from simhash import Simhash, SimhashIndex
+from scipy.stats import binned_statistic
 import re
 import os
 from random import shuffle
@@ -21,41 +23,21 @@ from tqdm import tqdm
 from collections import defaultdict
 
 
-def read_sample_file():
-    with open("data/2022京东电商数据比赛/京东商品标题实体识别数据集/train_data/train.txt", 'r') as f:
-        lines = f.readlines()
+def extract_line_entity(lines, space_char, entities, split_=" "):
+    """_summary_
 
-    entities = defaultdict(list)
-    samples = []
+    Args:
+        line (_type_): _description_
+    """
     sample = []
-    texts = []
-    space_char = "[unused1]"
-    text_entity_pair = []
-    entity_txt = ''
-    entity_name = ''
+    entity_txt = ""
+    entity_name = ""
     single_pair = defaultdict(list)
-    index = 0
-    for i, line in enumerate(lines):
-        line = line.strip()
-        if len(line) == 0:
-            if len(sample):
-                samples.append(sample)
-                text = "".join([t.split("\t")[0] for t in sample])
-                text = text.replace(space_char, " ")
-                texts.append(text)
-                if entity_name:
-                    entities[entity_name].append("".join(entity_txt))
-                    single_pair[entity_name].append("".join(entity_txt))
-                text_entity_pair.append(
-                    {"id": index, "text": text, "entities": single_pair, "sample": sample})
-                index += 1
-
-            entity_txt = ''
-            entity_name = ""
-            single_pair = defaultdict(list)
-            sample = []
-            continue
-        line = line.split(" ")
+    single_pair_score = []
+    start = 0
+    scores = []
+    for index, line in enumerate(lines):
+        line = line.split(split_)
 
         if len(line) == 2:
             txt, tag = line
@@ -64,35 +46,92 @@ def read_sample_file():
             tag = line[0]
             txt = " "
             sample.append("\t".join((space_char, line[0])))
+        elif len(line) == 3:
+            txt, tag, score = line
+            scores.append(score)
+            sample.append("\t".join(line))
         else:
             print(line)
         if tag == "O":
             if entity_name:
                 entities[entity_name].append("".join(entity_txt))
                 single_pair[entity_name].append("".join(entity_txt))
+                single_pair_score.append(
+                    [entity_name, "".join(entity_txt), start, index])
+            start = index
             entity_txt = ''
             entity_name = ""
         elif tag.startswith("B"):
             if entity_name:
                 entities[entity_name].append("".join(entity_txt))
                 single_pair[entity_name].append("".join(entity_txt))
+                single_pair_score.append(
+                    [entity_name, "".join(entity_txt), start, index])
+            start = index
             entity_txt = ''
             entity_txt += txt
             entity_name = tag.split("-")[-1]
         else:
             entity_txt += txt
             # entity_name = tag.split("-")[-1]
+    if entity_name:
+        entities[entity_name].append("".join(entity_txt))
+        single_pair[entity_name].append("".join(entity_txt))
+        single_pair_score.append(
+            [entity_name, "".join(entity_txt), start, index])
+    if len(scores):
+        for single in single_pair_score:
+            single.append(scores[single[2]:single[3]])
+    return sample, single_pair, single_pair_score, scores
 
-    if len(sample):
+
+def extract_entity(lines, space_char, split_=" "):
+    entities = defaultdict(list)  # 按照类别分别搜集所有实体
+    samples = []  # 所有样本集合
+    texts = []  # 文本集合
+    text_entity_pair = []  # 所有信息
+
+    index = 0
+    single_sample = []
+    pair_scores = {}
+    for i, line in tqdm(enumerate(lines)):
+        line = line.strip()
+        if len(line) == 0 and len(single_sample):
+            sample, single_pair, single_pair_score, _ = extract_line_entity(
+                single_sample, space_char, entities, split_)
+            samples.append(sample)
+            text = "".join([t.split("\t")[0] for t in sample])
+            text = text.replace(space_char, " ")
+            texts.append(text)
+            text_entity_pair.append(
+                {"id": index, "text": text, "entities": single_pair, "sample": sample})
+            pair_scores[text] = single_pair_score
+            index += 1
+            single_sample = []
+        elif len(line) != 0:
+            single_sample.append(line)
+
+    if len(single_sample):
+        sample, single_pair, single_pair_score, _ = extract_line_entity(
+            single_sample, space_char, entities, split_)
+        samples.append(sample)
         text = "".join([t.split("\t")[0] for t in sample])
         text = text.replace(space_char, " ")
         texts.append(text)
-        samples.append(sample)
-        if entity_name:
-            entities[entity_name].append("".join(entity_txt))
-            single_pair[entity_name].append("".join(entity_txt))
         text_entity_pair.append(
             {"id": index, "text": text, "entities": single_pair, "sample": sample})
+        index += 1
+        pair_scores[text] = single_pair_score
+    return samples, texts, text_entity_pair, entities, pair_scores
+
+
+def read_sample_file():
+    with open("data/2022京东电商数据比赛/京东商品标题实体识别数据集/train_data/train.txt", 'r') as f:
+        lines = f.readlines()
+
+    space_char = "[unused1]"
+    samples, texts, text_entity_pair, entities, _ = extract_entity(
+        lines, space_char)
 
     number = len(text_entity_pair)
     train_number = int(number*0.9)
@@ -462,7 +501,7 @@ def merge_mul_label_info(correct_result):
         字典匹配的：['网', '红', '直', '播']=>['B-5', 'I-5', 'I-5', 'I-5'],
                   ['直', '播', '支', '架']=>['B-4', 'I-4', 'I-4', 'I-4'],
                   这种场景，保持与原有人工标注一致，不改变
-        
+
         场景1，如果人工标注的为O,但是字典匹配的多个，以最长的字典匹配的标签为准
         场景2，如果人工标注为多个类别，但是而字典的最长匹配只标注了一个类别，且与人工标注的类别有重叠，且与不与其他字典匹配进行重叠(如示例1)，以字典为准，
         场景3，
@@ -614,8 +653,14 @@ def choice_high_entity():
         strong_entities = []
         for w, info in lab_keywords_match_info.items():
             ratio = info['O_num']/info['num']
-            if ratio > 0.88:
+            # if info['num'] > 5:
+            if ratio > 0.90:
+                # if ratio > 0.5:
                 strong_entities.append(w)
+            # else:
+            #     # 预防匹配上个数太少，比例不完善
+            #     if info['num']-info['O_num'] <= 1:
+            #         strong_entities.append(w)
         # for ent in low_entities:
         #     data[lab].remove(ent)
         data[lab] = strong_entities
@@ -623,11 +668,108 @@ def choice_high_entity():
         json.dump(data, f, ensure_ascii=False)
 
 
+def statistic_predict_info_v1():
+    """利用crf对每个字符的分数，统计预测准确实体和错误实体的分数的分布情况
+    """
+    with open("data/val_predict.txt", 'r') as f:
+        lines = f.readlines()
+
+    with open("data/val.json", 'r') as f:
+        target = json.load(f)
+
+    _, _, _, _, predict_pair_scores = extract_entity(lines, " ")
+
+    target_pair_scores = {}
+    entities = defaultdict(list)  # 按照类别分别搜集所有实体
+    for line in target:
+        sample = line['sample']
+        sample, single_pair, single_pair_score, _ = extract_line_entity(
+            sample, " ", entities, split_="\t")
+        text = "".join([t.split("\t")[0] for t in sample])
+        target_pair_scores[text] = single_pair_score
+
+    correct_score = defaultdict(list)
+    error_score = defaultdict(list)
+    for txt, p_pair_score in predict_pair_scores.items():
+        t_pair_score = target_pair_scores[txt]
+        for p_t, p_w, p_s, p_e, p_score in p_pair_score:
+            for t, w, s, e in t_pair_score:
+                if p_t == t and p_s == s and p_e == e:
+                    sub = (p_e-p_s) if (p_e-p_s) > 0 else 1
+                    correct_score[t].append(
+                        round(sum(map(float, p_score))/sub, 3))
+                    break
+            sub = (p_e-p_s) if (p_e-p_s) > 0 else 1
+            error_score[p_t].append(round(sum(map(float, p_score))/sub, 3))
+    with open("./data/analysis_val_score.json", 'w') as f:
+        json.dump({"correct_score": correct_score,
+                  "error_score": error_score}, f, ensure_ascii=False)
+
+
+def expand_text(index, text):
+    """_summary_
+
+    Args:
+        index (_type_): _description_
+        text (_type_): _description_
+    """
+    s = 0
+    text_tag = []
+    for lab, start, end in index:
+        if start > s:
+            text_tag.extend([" ".join((t, "O")) for t in text[s:start]])
+        text_tag.extend([" ".join((t, "B-"+lab)) if i == 0 else " ".join((t, "I-"+lab))
+                        for i, t in enumerate(text[start:end])])
+        s = end
+
+    if s < len(text):
+        text_tag.extend([" ".join((t, "O")) for t in text[s:]])
+    return text_tag
+
+
+def entity_dict_map():
+    """字典匹配
+    """
+
+    with open("data/strong_entites.json", 'r') as f:
+        data = json.load(f)
+    keywords = KeywordProcessor()
+    keywords._white_space_chars = []
+    keywords.non_word_boundaries = set()
+    keywords.add_keywords_from_dict(data)
+
+    with open("data/2022京东电商数据比赛/京东商品标题实体识别数据集/train_data/unlabeled_train_data.txt", 'r') as f:
+        lines = f.readlines()
+
+    space_char = "[unused1]"
+    text_tag = {}
+    for line in tqdm(lines):
+        line = line.strip("\n")
+        info = keywords.extract_keywords(line, span_info=True)
+        tags = expand_text(info, line)
+        line = line.replace(" ", space_char)
+        text_tag[line] = tags
+    with open("data/2022京东电商数据比赛/京东商品标题实体识别数据集/train_data/unlabeled_train_data_map_dict.json", 'w') as f:
+        json.dump(text_tag, f, ensure_ascii=False)
+
+
 if __name__ == "__main__":
-    read_sample_file()
+    # read_sample_file()
     # get_pinyin_vocab()
     # pretrain_data()
     # baidu_lac()
     # collect_duplicates_entity_data()
     # correct_text()
     # choice_high_entity()
+    # statistic_predict_info()
+    entity_dict_map()
+
+    # with open("data/2022京东电商数据比赛/京东商品标题实体识别数据集/train_data/unlabeled_train_data_predict.txt", 'r') as f:
+    #     lines = f.readlines()
+
+    # samples, texts, text_entity_pair, entities, predict_pair_scores = extract_entity(
+    #     lines, " ")
+    # for line in text_entity_pair:
+    #     line['is_weak'] = 1
+    # with open("data/2022京东电商数据比赛/京东商品标题实体识别数据集/train_data/weak_label_data.json", 'w') as f:
+    #     json.dump(text_entity_pair, f, ensure_ascii=False)
